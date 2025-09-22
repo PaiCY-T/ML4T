@@ -1,313 +1,384 @@
 ---
 name: ML4T
-description: Personal quantitative trading system for Taiwan stocks with weekly/monthly cycles targeting realistic 12-15% annual returns
-status: in_epic
-created: 2025-09-20T20:54:13Z
-updated: 2025-09-21T03:19:06Z
+description: MVP machine learning trading system to prove systematic alpha concept for Taiwan Stock Exchange
+status: backlog
+created: 2025-09-21T15:18:44Z
 ---
 
-# PRD: ML4T
+# PRD: ML4T (Machine Learning for Trading) - MVP Validation
 
 ## Executive Summary
 
-ML4T is a personal quantitative trading system designed for Taiwan stock markets (TSE/OTC) with weekly and monthly trading cycles. The system aims to achieve realistic risk-adjusted returns through multi-strategy quantitative approaches, targeting 12-15% annual returns with <20% maximum drawdown and >1.2 Sharpe ratio. Built on Python 3.10+ with FinLab data integration and Fubon API execution, the system supports flexible strategy development and risk management for personal capital deployment with proper market impact considerations.
+ML4T MVP is a **proof-of-concept** machine learning trading system designed to validate whether systematic factor-based alpha generation is viable for Taiwan Stock Exchange (TSE). The MVP focuses on proving the core hypothesis with a single strategy before building a comprehensive multi-strategy system.
+
+**Core Hypothesis**: Can machine learning systematically generate alpha in TSE markets using weekly momentum factors?
+
+**MVP Objectives (Proof of Concept):**
+- **Primary Target**: 12-15% annual return, Sharpe ratio 1.2-1.5
+- **Stretch Goal**: 20% annual return, Sharpe ratio >2.0
+- **Risk Constraint**: Maximum drawdown <15%
+- **MVP Capital**: 1-3M NTD for initial validation
+- **Success Criteria**: 6-month paper trading validation before scaling to 30M NTD
 
 ## Problem Statement
 
 ### What problem are we solving?
-- **Manual Trading Limitations**: Traditional discretionary trading lacks systematic approach, consistency, and scalability
-- **Emotional Decision Making**: Human bias and emotional responses lead to suboptimal trading decisions
-- **Limited Strategy Coverage**: Single-strategy approaches miss diversification benefits across market regimes
-- **Inefficient Risk Management**: Manual portfolio management cannot effectively balance risk across positions and strategies
+**Core Question**: Does systematic ML-driven trading provide sustainable alpha in Taiwan markets?
 
-### Why is this important now?
-- Taiwan stock market offers significant alpha opportunities for systematic approaches
-- Advanced ML techniques and alternative data provide competitive advantages
-- FinLab platform provides comprehensive Taiwan market data infrastructure
-- Personal capital scale (30M NTD) requires professional-grade systematic approach
+**Specific Challenges to Validate:**
+1. **Factor Effectiveness**: Do momentum/value factors work consistently in TSE?
+2. **ML Value-Add**: Does machine learning improve upon simple factor scores?
+3. **Transaction Cost Impact**: Can alpha overcome Taiwan's transaction costs (0.04275% + 0.3% tax)?
+4. **Market Microstructure**: Can systematic approaches handle TSE liquidity patterns?
+
+### Why MVP-first approach?
+- **Risk Mitigation**: Prove concept before major capital commitment
+- **Learning Priority**: Understand TSE market behavior before complexity
+- **Cost Efficiency**: Validate hypothesis with minimal infrastructure investment
+- **Reality Check**: Test if ambitious targets (Sharpe >2.0) are achievable
 
 ## User Stories
 
-### Primary User Persona: Personal Quantitative Trader
-**Background**: Experienced trader with 30M NTD capital seeking systematic, data-driven investment approach
+### Primary User Persona: Quantitative Trader (Concept Validation)
 
-#### User Journey 1: Strategy Development & Backtesting
-- **As a trader**, I want to develop and backtest new quantitative strategies
-- **So that** I can validate alpha generation before risking capital
-- **Acceptance Criteria**:
-  - Can create new strategy configurations via YAML files
-  - Can backtest strategies with >10 years historical data
-  - Can analyze performance metrics including Deflated Sharpe ratio
-  - Can compare strategy performance across different market regimes
+**User Journey 1: Hypothesis Validation**
+- As a trader, I want to prove systematic alpha exists in TSE so that I can justify building a full system
+- **Acceptance Criteria:**
+  - Single strategy (MOM_W) consistently outperforms TSE benchmark over 2+ years backtest
+  - Walk-forward analysis shows stable performance across market regimes
+  - Information Coefficient >0.02 for momentum factors in TSE
 
-#### User Journey 2: Portfolio Management & Risk Control
-- **As a trader**, I want automated portfolio construction and risk management
-- **So that** I can maintain target risk levels without constant monitoring
-- **Acceptance Criteria**:
-  - Automated position sizing based on risk parity allocation
-  - Real-time risk monitoring with configurable alerts
-  - Single-name exposure limits (≤10% per position)
-  - Portfolio-level drawdown protection (≤15%)
+**User Journey 2: Cost Model Validation**
+- As a trader, I want realistic transaction cost modeling so that I understand true alpha after costs
+- **Acceptance Criteria:**
+  - Accurate Taiwan-specific cost modeling (0.04275% fee + 0.3% tax)
+  - Slippage estimation based on order size vs TSE daily volumes
+  - Backtest vs live trading performance tracking <5% deviation
 
-#### User Journey 3: Live Trading Execution
-- **As a trader**, I want automated trade execution via Fubon API
-- **So that** I can implement systematic strategies without manual intervention
-- **Acceptance Criteria**:
-  - Seamless integration with Fubon trading API
-  - Pre-trade risk checks and validation
-  - Transaction cost optimization
-  - Execution logging and reconciliation
+**User Journey 3: Infrastructure Validation**
+- As a trader, I want end-to-end pipeline validation so that I can scale with confidence
+- **Acceptance Criteria:**
+  - Automated data pipeline (FinLab EOD + Fubon real-time)
+  - Paper trading execution matches backtest expectations
+  - System runs reliably for 3+ months without manual intervention
+
+**User Journey 4: Scalability Assessment**
+- As a trader, I want to understand system limitations so that I can plan capital deployment
+- **Acceptance Criteria:**
+  - Strategy capacity analysis for TSE liquidity constraints
+  - Performance degradation thresholds identified
+  - Clear go/no-go criteria for scaling to full system
 
 ## Requirements
 
-### Functional Requirements
+### MVP Functional Requirements
 
-#### Core Trading Engine
-- **Multi-Strategy Framework**: Support for momentum, value, and ML-based strategies
-- **Flexible Holding Periods**: Adaptive position duration based on signal strength and market conditions
-- **Strategy Extensibility**: Plugin architecture for adding new alpha strategies
-- **Fractional Kelly Allocation**: Dynamic capital allocation using 0.25-0.3 Kelly criterion with risk parity principles
+#### Core Validation Engine (Single Strategy Focus)
+- **MOM_W Strategy Only**: Weekly momentum with 3-5 key technical factors
+- **Simplified ML Pipeline**: LightGBM with time-series cross-validation
+- **TSE-Specific Backtesting**: 10+ years Taiwan market data with realistic costs
+- **Walk-Forward Validation**: 3-year rolling windows to prove consistency
 
-#### Data Management (DataHub)
-- **FinLab Integration**: Primary data source for Taiwan market data
-- **EOD Updates**: Automated daily data refresh at 23:00
-- **Historical Coverage**: Minimum 10 years of clean historical data (2012-present)
-- **Factor Engineering**: Technical, fundamental, and sentiment factor generation
+#### Minimal Data Infrastructure
+- **EOD Data**: FinLab API integration for historical and daily updates
+- **Basic Real-time**: Fubon API for market snapshots and paper trading
+- **Simple Storage**: Local CSV/Parquet files (no database complexity)
+- **Data Quality**: Basic validation and forward-fill for missing data
 
-#### Strategy Engine
-- **MOM_W (Momentum Weekly)**: Short-term momentum strategy with technical indicators
-- **VAL_M (Value Monthly)**: Value-based strategy using fundamental metrics
-- **ML_RANK (ML Monthly)**: Machine learning composite scoring system
-- **Strategy Orchestration**: Coordinated signal generation and position management
+#### Proof-of-Concept Risk Management
+- **Position Limits**: Max 20 stocks, 5% per position (conservative for MVP)
+- **Simple Sizing**: Equal-weight or volatility targeting
+- **Basic Stops**: 10% individual stock stop-loss
+- **Portfolio Protection**: 15% maximum drawdown trigger
 
-#### Execution System
-- **Fubon API Integration**: Replace SinopacAccount with Fubon trading API
-- **Pre-trade Risk Checks**: Automated validation before order submission
-- **Cost Optimization**: Minimize transaction costs and market impact
-- **Order Management**: Support for market, limit, and stop orders
-
-#### Risk Management
-- **Position Limits**: Maximum 10% allocation per single name
-- **Portfolio Protection**: Maximum 20% drawdown trigger for risk reduction
-- **Stop Loss**: ATR-based or volatility-scaled stops (not fixed 10%)
-- **VaR Monitoring**: 250-day rolling parametric VaR estimation
-- **Liquidity Filter**: ADV >50M NTD to ensure 30M NTD scalability
+#### MVP Execution System
+- **Paper Trading Only**: Validate execution logic without capital risk
+- **Daily Rebalancing**: Simple weekly signal with daily execution
+- **Manual Override**: All orders reviewed before submission
+- **Performance Tracking**: Paper vs backtest deviation monitoring
 
 ### Non-Functional Requirements
 
-#### Performance
-- **Latency**: Strategy signal generation within 5 minutes of market close
-- **Throughput**: Support for up to 50 concurrent positions
-- **Reliability**: 99.5% system uptime during market hours
-- **Data Processing**: Handle full Taiwan market universe (1800+ stocks)
+#### Performance (MVP Scope)
+- **Backtest Speed**: 10-year Taiwan market backtest in <10 minutes
+- **Data Processing**: Daily EOD processing in <15 minutes
+- **Signal Generation**: Weekly portfolio rebalancing in <5 minutes
+- **Monitoring**: Daily performance tracking and alert system
 
-#### Security
-- **API Security**: Encrypted storage of Fubon API credentials
-- **Data Protection**: Local storage only, no cloud data transmission
-- **Access Control**: Single-user authentication for system access
-- **Audit Trail**: Complete logging of all trading decisions and executions
+#### Simplicity and Reliability
+- **Minimal Dependencies**: Core Python stack only (pandas, numpy, sklearn)
+- **Single Machine**: Local development environment only
+- **Manual Oversight**: Human validation of all key decisions
+- **Basic Logging**: Simple file-based logging for debugging
 
-#### Scalability
-- **Capital Scaling**: Start with smaller amounts, scale to 30M NTD
-- **Strategy Scaling**: Support for additional strategy modules
-- **Performance Scaling**: Linear performance with position count
-- **Data Scaling**: Efficient handling of expanding historical datasets
+#### MVP-Specific Constraints
+- **No Real Trading**: Paper trading only until concept proven
+- **Single Strategy**: Focus on MOM_W until validated
+- **Taiwan Only**: TSE/OTC markets only
+- **Conservative Sizing**: Small positions to minimize any unforeseen risks
 
 ## Success Criteria
 
-### Primary Metrics
-- **Annual Return**: Target 12-15% risk-adjusted returns (stretch goal: >20%)
-- **Sharpe Ratio**: Achieve 1.2-1.5 Sharpe ratio consistently (stretch goal: >2.0)
-- **Maximum Drawdown**: Maintain <20% maximum drawdown
-- **Win Rate**: Strategy-dependent but aim for >55% overall
+### MVP Validation Metrics (6-Month Evaluation)
 
-### Secondary Metrics
-- **Volatility**: Keep portfolio volatility 12-18% annually
-- **Turnover**: Optimize for <200% annual turnover
-- **Transaction Costs**: Keep total costs <0.5% annually
-- **System Uptime**: Maintain >99% operational availability
+#### Primary Success Criteria (Must Achieve All)
+- **Backtest Performance**: 12-15% CAGR, Sharpe >1.2, MDD <15% over 10+ years
+- **Factor Significance**: Information Coefficient >0.02 for momentum factors
+- **Cost Realism**: Post-cost returns remain positive after 0.04275% + 0.3% costs
+- **Paper Trading**: Live paper performance within 5% of backtest expectations
 
-### Validation Criteria
-- **Backtesting**: 10+ years out-of-sample validation
-- **Walk-Forward**: 3-year rolling window validation
-- **Deflated Sharpe**: Statistical significance testing
-- **Regime Testing**: Performance across bull/bear/sideways markets
+#### Secondary Success Criteria (Prove Scalability)
+- **Consistency**: Positive returns in 7/10 years of walk-forward analysis
+- **Market Regime Robustness**: Strategy works in bull, bear, and sideways markets
+- **Liquidity Validation**: Strategy works with realistic position sizes for 30M NTD
+- **System Reliability**: 95%+ uptime during paper trading period
+
+#### Stretch Success Criteria (Exceptional Performance)
+- **High Sharpe**: Achieve Sharpe ratio >2.0 consistently
+- **Low Volatility**: Portfolio volatility <15% annually
+- **High Hit Rate**: >60% winning trades
+- **Strong IC**: Information Coefficient >0.05
+
+### Go/No-Go Decision Framework
+
+#### **GO**: Scale to Full System (30M NTD)
+- All primary success criteria met
+- 3+ secondary criteria achieved
+- 6-month paper trading successful
+- Clear understanding of capacity limits
+
+#### **MODIFY**: Adjust Strategy/Parameters
+- Primary criteria partially met
+- Paper trading shows systematic biases
+- Need parameter optimization or factor adjustment
+- Extend paper trading period
+
+#### **NO-GO**: Abandon or Redesign
+- Primary success criteria not met
+- Negative or inconsistent paper trading results
+- Transaction costs eliminate alpha
+- Strategy doesn't work in TSE market structure
 
 ## Constraints & Assumptions
 
-### Technical Constraints
-- **Local Deployment**: System runs on single local machine only
-- **Data Dependency**: Reliant on FinLab data quality and availability
-- **API Limitations**: Subject to Fubon API rate limits and connectivity
-- **Python Ecosystem**: Limited to Python 3.10+ compatible libraries (3.11 compatibility issues with Zipline/TA-Lib)
+### MVP-Specific Constraints
+- **Capital Limitation**: Paper trading only, no real capital at risk
+- **Strategy Limitation**: Single strategy (MOM_W) validation only
+- **Market Limitation**: Taiwan TSE/OTC only
+- **Time Limitation**: 6-month validation period before scaling decision
 
-### Capital Constraints
-- **Initial Capital**: Start with smaller amounts before scaling to 30M NTD
-- **Position Sizing**: Cannot exceed 10% in any single name
-- **Liquidity Requirements**: Must trade only liquid Taiwan stocks
-- **Currency Risk**: Limited to NTD-denominated assets
+### Updated Cost Assumptions
+- **Brokerage Fee**: 0.04275% (corrected: 0.1425% × 0.3)
+- **Securities Transaction Tax**: 0.3% on sell orders
+- **Estimated Slippage**: 0.02-0.05% based on order size
+- **Total Transaction Cost**: ~0.37% roundtrip (conservative estimate)
 
-### Operational Constraints
-- **Market Hours**: Limited to Taiwan market trading hours
-- **Manual Oversight**: Requires periodic manual monitoring and intervention
-- **Strategy Capacity**: Limited by Taiwan market liquidity
-- **Development Resources**: Single developer/operator
+### Critical Assumptions to Validate
+- **Factor Persistence**: TSE momentum factors remain predictive over time
+- **Market Efficiency**: Semi-strong form efficiency allows factor-based alpha
+- **Data Quality**: FinLab provides clean, survivorship-bias-free data
+- **Execution Reality**: Paper trading reflects actual execution characteristics
 
-### Key Assumptions
-- FinLab data accuracy and completeness
-- Fubon API reliability and performance
-- Taiwan market structure stability
-- Regulatory environment unchanged
-- Local computing resources sufficient
+## Out of Scope (MVP Phase)
 
-## Out of Scope
+### Explicitly NOT Building in MVP
+- **Multiple Strategies**: Focus on single strategy validation only
+- **Real Trading**: Paper trading only until concept proven
+- **Complex ML**: Simple LightGBM, no deep learning or ensemble methods
+- **Database Systems**: File-based storage sufficient for MVP
+- **Real-time Dashboard**: Basic logging and alerts sufficient
+- **Options/Derivatives**: Equity long-only for simplicity
+- **Risk Parity**: Equal weight or simple volatility targeting only
 
-### Explicitly NOT Building
-- **Multi-User Support**: System designed for single personal use only
-- **Cloud Deployment**: No cloud infrastructure or remote access
-- **Real-time Intraday Trading**: Focus on EOD and longer-term signals
-- **International Markets**: Taiwan stocks only, no foreign exchanges
-- **Options/Derivatives**: Equity long-only strategies
-- **Alternative Data**: No news, social media, or satellite data integration
-- **Mobile Interface**: Desktop/command-line interface only
-- **Regulatory Reporting**: No compliance or regulatory reporting features
-
-### Future Considerations
-- Alternative data integration (news, sentiment)
-- Intraday strategy development
-- Options overlay strategies
-- International diversification
+### Reserved for Full System (If MVP Succeeds)
+- **Multi-Strategy Framework**: Add VAL_M and ML_RANK strategies
+- **Advanced ML Pipeline**: Ensemble methods, feature engineering
+- **Production Infrastructure**: Database, monitoring, alerting systems
+- **Risk Management**: Sophisticated position sizing and hedging
+- **Live Trading**: Real capital deployment with full automation
 
 ## Dependencies
 
-### External Dependencies
-- **FinLab Platform**: Core data provider for Taiwan market data
-- **Fubon Securities API**: Trading execution and order management
-- **Taiwan Stock Exchange**: Market data and trading venue
-- **Python Ecosystem**: pandas, numpy, scikit-learn, lightgbm libraries
+### Critical Dependencies (Must Have)
+- **FinLab API**: Historical TSE data and basic factors
+- **Fubon API**: Real-time data and paper trading capability
+- **Python Environment**: Core ML and data analysis libraries
+- **TSE Market Access**: Taiwan market data and trading infrastructure
 
-### Internal Dependencies
-- **System Infrastructure**: Local development machine capabilities
-- **Data Storage**: Local PostgreSQL/DuckDB setup
-- **Network Connectivity**: Stable internet for data/API access
-- **Time Synchronization**: Accurate system time for trading operations
+### Optional Dependencies (Nice to Have)
+- **Advanced Charting**: For manual strategy analysis
+- **Database System**: For production scalability
+- **Cloud Infrastructure**: For system redundancy
+- **Additional Data Sources**: For strategy diversification
 
-### Critical Path Dependencies
-1. **Fubon API Integration**: Must complete before live trading
-2. **Historical Data Validation**: Required before strategy development
-3. **Risk Management System**: Must be operational before capital deployment
-4. **Backtesting Framework**: Needed for strategy validation
+## Technical References
 
-## Implementation Phases
+### FinLab API Integration
+**Reference**: `/mnt/c/Users/jnpi/ML4T/new/example/FINLAB_API_REFERENCE.md`
 
-*Architecture based on analysis of machine-learning-for-trading.md - 150+ notebook ML trading system*
+**Key FinLab Capabilities for MVP:**
+- **Data Access**: `data.get('price:收盤價')` for OHLCV data, 2000+ Taiwan stocks
+- **Technical Indicators**: 100+ indicators via `data.indicator('RSI', timeperiod=14)`
+- **Factor Engineering**: `feature.combine()` for multi-factor combinations
+- **ML Pipeline**: `MLEngine()` with LightGBM/XGBoost integration
+- **Backtesting**: `backtest.sim()` with Taiwan-specific cost modeling
+- **Universe Filtering**: `data.universe(market='TSE_OTC')` for stock selection
+- **Information Coefficient**: Built-in `calculate_ic()` for factor validation
+- **Local Caching**: `save_to_storage=True` for development efficiency
 
-### Phase 1: Foundation & Critical Fixes (Weeks 1-4)
-**Priority: Address architectural debt and establish robust foundation**
+**MVP-Specific Usage Pattern:**
+```python
+# Data acquisition with caching
+close = data.get('price:收盤價', save_to_storage=True)
+volume = data.get('price:成交股數', save_to_storage=True)
 
-- **Critical Bug Fixes**:
-  - Fix `lookahead=None` default causing runtime crashes in utils.py
-  - Correct reward calculation using current day costs in trading_env.py
-  - Implement proper look-ahead bias prevention
+# Technical factor generation
+rsi = data.indicator('RSI', timeperiod=14)
+sma_20 = data.indicator('SMA', timeperiod=20)
 
-- **Core Infrastructure**:
-  - Replace HDF5 with DuckDB/Parquet for simplified deployment
-  - Implement `MultipleTimeSeriesCV` class for temporal splitting
-  - FinLab integration with automated EOD data pipeline
-  - Local PostgreSQL/DuckDB hybrid storage architecture
+# Signal generation for MOM_W strategy
+momentum_signal = (close > sma_20) & (rsi > 50)
 
-- **Development Environment**:
-  - Python 3.11 + core ML stack (pandas, numpy, scikit-learn)
-  - Finance-specific libraries (talib, zipline-reloaded, pyfolio-reloaded)
-  - Jupyter environment for research and validation
+# Backtesting with realistic costs
+position = backtest.sim(momentum_signal,
+                       resample='W',  # Weekly rebalancing
+                       position_limit=20,
+                       fee_ratio=0.0004275,  # 0.04275%
+                       tax_ratio=0.003)      # 0.3%
 
-### Phase 2: Factor Engineering & ML Pipeline (Weeks 5-8)
-**Priority: Simplified factor library with statistical rigor**
+# Performance analysis
+report = backtest.report(position)
+```
 
-- **Simplified Factor Library (≤10 factors)**:
-  - **Fundamental**: Book-to-Market, ROA/ROE, Gross Margins
-  - **Technical**: 20-day volatility breakouts, 13/26-week MA crosses, 52-week high distance
-  - **Momentum**: 12-2 momentum (skip recent month to avoid reversals)
+### ML4T Architecture Foundation
+**Reference**: `/mnt/c/Users/jnpi/ML4T/new/example/machine-learning-for-trading.md`
 
-- **ML Pipeline Implementation**:
-  - Time-series cross-validation with proper purging
-  - Spearman correlation-based alpha selection
-  - LightGBM model with feature importance tracking
-  - IC (Information Coefficient) filtering with 0.02 threshold
+**Core Architecture Components from ML4T:**
+- **Data Pipeline**: HDF5 → DuckDB migration for simplified deployment
+- **Factor Library**: 50+ technical, fundamental, and sentiment factors
+- **ML Models**: LightGBM/XGBoost with time-series cross-validation
+- **Backtesting Engine**: Zipline integration with realistic cost modeling
+- **Risk Management**: Position sizing, sector limits, and drawdown controls
 
-- **Statistical Validation**:
-  - Deflated Sharpe ratio implementation
-  - Walk-forward analysis with 3-year windows
-  - Regime testing across bull/bear/sideways markets
+**Critical Fixes Identified for Production:**
+1. **utils.py line 23**: Fix `lookahead=None` default causing runtime crashes
+2. **trading_env.py line 178**: Correct reward calculation using wrong day's costs
+3. **trading_env.py line 242**: Resolve Gym compatibility issues with pandas
 
-### Phase 3: Risk Management & Backtesting (Weeks 9-12)
-**Priority: Production-ready risk controls and cost modeling**
+**MVP Simplification Strategy:**
+- **Reduce Complexity**: Remove 80% of intraday complexity for weekly/monthly focus
+- **Storage Migration**: Replace HDF5 with DuckDB/Parquet for easier deployment
+- **Factor Selection**: Focus on 5-10 key factors instead of 50+ for MVP validation
+- **Cost Modeling**: Implement Taiwan-specific transaction costs (0.04275% + 0.3% tax)
 
-- **Risk Management Framework**:
-  - Fractional Kelly position sizing (0.25-0.3 Kelly, max 10% per asset)
-  - Sector exposure limits (25% NAV maximum with GICS classification)
-  - ATR-based stop-loss (volatility-scaled, not fixed percentage)
-  - 250-day rolling parametric VaR with 95% confidence
-  - Liquidity filter: ADV >50M NTD for market impact control
+**Recommended Factor Set for MVP (Weekly Momentum):**
+```python
+# Technical Momentum Factors (3-5 factors max)
+price_momentum = close / close.shift(20)  # 20-day momentum
+rsi_14 = data.indicator('RSI', timeperiod=14)
+sma_ratio = close / data.indicator('SMA', timeperiod=20)
+volatility_20d = close.pct_change().rolling(20).std()
 
-- **Realistic Cost Modeling**:
-  - `trading_cost_bps` and `time_cost_bps` parameters
-  - Taiwan market transaction costs (0.1425% fee + 0.3% tax)
-  - Slippage modeling based on order size vs daily volume
-  - Market impact estimation for large orders
+# Simple factor combination for MVP
+combined_score = (price_momentum.rank(pct=True) +
+                 rsi_14.rank(pct=True) +
+                 sma_ratio.rank(pct=True)) / 3
+```
 
-- **Backtesting Engine**:
-  - Zipline integration for realistic execution simulation
-  - Pyfolio-reloaded for comprehensive performance analytics
-  - Multi-timeframe strategy coordination (weekly/monthly)
-  - Out-of-sample validation with 10+ years data
+**Time-Series Cross-Validation Implementation:**
+```python
+# Proper temporal splitting to avoid look-ahead bias
+from sklearn.model_selection import TimeSeriesSplit
 
-### Phase 4: Production Deployment & Scaling (Weeks 13-16)
-**Priority: Live trading with monitoring and gradual scaling**
+def time_series_cv(features, labels, n_splits=5):
+    tscv = TimeSeriesSplit(n_splits=n_splits)
+    for train_idx, test_idx in tscv.split(features):
+        X_train = features.iloc[train_idx]
+        X_test = features.iloc[test_idx]
+        y_train = labels.iloc[train_idx]
+        y_test = labels.iloc[test_idx]
 
-- **Broker Integration**:
-  - Fubon API integration with error handling and retry logic
-  - Pre-trade risk checks and position validation
-  - Order management system (market/limit/stop orders)
-  - Real-time portfolio reconciliation
+        # Purge overlapping periods
+        gap_days = 5  # Avoid look-ahead bias
+        X_test = X_test.iloc[gap_days:]
+        y_test = y_test.iloc[gap_days:]
 
-- **Production Infrastructure**:
-  - Containerized deployment with Docker
-  - Automated nightly data pipeline and factor generation
-  - Comprehensive logging and audit trail
-  - Performance monitoring dashboard
+        yield X_train, X_test, y_train, y_test
+```
 
-- **Gradual Capital Deployment**:
-  - Start with 1M NTD for system validation
-  - Monthly performance review and scaling decisions
-  - Risk parameter optimization based on live results
-  - Scale to full 30M NTD over 6-month period
+### Integration Strategy
+1. **Use FinLab as primary data source** for Taiwan market coverage
+2. **Implement ML4T architecture patterns** adapted for Taiwan market
+3. **Focus on proven factors** from both references for MVP validation
+4. **Leverage FinLab's built-in backtesting** with Taiwan-specific costs
+5. **Apply ML4T risk management** principles with FinLab execution
 
-- **Monitoring & Optimization**:
-  - Real-time P&L tracking and risk metrics
-  - Strategy performance attribution analysis
-  - Alert system for drawdown and risk breaches
-  - Monthly strategy review and parameter tuning
+## Implementation Phases (MVP-Focused)
 
-### Implementation Success Criteria
-- **Phase 1**: Clean data pipeline, proper CV framework, bug-free foundation, liquidity filters active
-- **Phase 2**: IC > 0.02 factors, VIF < 5.0 for multicollinearity, statistically significant alpha
-- **Phase 3**: Sharpe > 1.2 in backtesting, max drawdown < 20%, realistic transaction costs
-- **Phase 4**: Live Sharpe > 1.0, system uptime > 99%, successful scaling with market impact analysis
+### Phase 1: Foundation & Validation (Weeks 1-6)
+**Goal**: Prove basic concept with backtesting
 
-## Risk Mitigation
+- **Week 1-2**: Setup FinLab data pipeline and historical data validation
+- **Week 3-4**: Implement single MOM_W strategy with realistic cost modeling
+- **Week 5-6**: Complete 10+ year backtest with walk-forward analysis
 
-### Technical Risks
-- **Data Quality**: Implement data validation and cleaning pipelines
-- **API Downtime**: Build retry logic and manual override capabilities
-- **System Failures**: Implement monitoring, alerting, and backup procedures
+**Success Gate**: Backtest shows 12%+ CAGR, Sharpe >1.2 after realistic costs
 
-### Market Risks
-- **Strategy Failure**: Diversification across multiple uncorrelated strategies
-- **Market Regime Change**: Regular strategy performance review and adaptation
-- **Liquidity Risk**: Position sizing based on average daily volume
+### Phase 2: Paper Trading Validation (Weeks 7-18)
+**Goal**: Validate backtest with live paper trading
 
-### Operational Risks
-- **Manual Errors**: Minimize manual intervention through automation
-- **Oversight Gaps**: Implement comprehensive logging and monitoring
-- **Knowledge Risk**: Document all systems and maintain code quality
+- **Week 7-8**: Setup Fubon API integration and paper trading infrastructure
+- **Week 9-18**: Live paper trading with daily monitoring and performance tracking
+- **Week 19**: Performance analysis and go/no-go decision
+
+**Success Gate**: Paper trading performance within 5% of backtest expectations
+
+### Phase 3: Scale Decision (Weeks 19-20)
+**Goal**: Make informed decision on full system development
+
+- **Analysis**: Compare paper trading vs backtest results
+- **Decision**: Go/Modify/No-Go based on success criteria
+- **Planning**: If GO, plan full system development with realistic targets
+
+### MVP Decision Gates
+
+#### Gate 1 (Week 6): Backtest Validation
+- **Pass**: Proceed to paper trading
+- **Fail**: Redesign strategy or abandon concept
+
+#### Gate 2 (Week 18): Paper Trading Validation
+- **Pass**: Plan full system development
+- **Modify**: Adjust parameters and extend validation
+- **Fail**: Abandon or completely redesign approach
+
+## Risk Assessment & Mitigation
+
+### MVP-Specific Risks
+
+#### **Concept Risk** (High Priority)
+- **Risk**: TSE markets may not support systematic alpha generation
+- **Mitigation**: Extensive backtesting across multiple market regimes
+- **Detection**: Monitor Information Coefficient and factor significance
+
+#### **Cost Model Risk** (High Priority)
+- **Risk**: Transaction costs may eliminate all alpha
+- **Mitigation**: Conservative cost estimates (0.37% roundtrip)
+- **Detection**: Track paper trading vs backtest cost deviations
+
+#### **Data Quality Risk** (Medium Priority)
+- **Risk**: FinLab data quality issues affecting backtests
+- **Mitigation**: Multiple data source validation and quality checks
+- **Detection**: Compare with alternative Taiwan market data sources
+
+#### **Overfitting Risk** (Medium Priority)
+- **Risk**: Strategy works in backtest but fails in live trading
+- **Mitigation**: Time-series CV, walk-forward analysis, conservative ML approach
+- **Detection**: Monitor paper trading vs backtest performance divergence
+
+### Success Protection Strategy
+- **Conservative Estimates**: Use pessimistic cost and slippage assumptions
+- **Extended Validation**: 6-month paper trading minimum
+- **Multiple Metrics**: Don't rely on single performance measure
+- **Regular Review**: Monthly performance assessment and adjustment
+
+**MVP Philosophy**: Better to validate a simple concept thoroughly than to build a complex system on unproven foundations.
