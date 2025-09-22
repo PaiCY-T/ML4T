@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//mnt/c/Users/jnpi/ML4T/example/**)",
+      "mcp__zen__chat",
+      "Bash(bash:*)",
+      "mcp__zen__consensus",
+      "Read(//mnt/c/Users/jnpi/taiwan-quant-trading-clean/trading/broker_integration/**)",
+      "Read(//mnt/c/Users/jnpi/taiwan-quant-trading-clean/src/data/core/**)",
+      "Read(//mnt/c/Users/jnpi/taiwan-quant-trading-clean/ML4T/factors/**)",
+      "mcp__zen__thinkdeep"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
