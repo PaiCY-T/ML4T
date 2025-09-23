@@ -25,6 +25,623 @@ from .validators import QualityIssue, SeverityLevel, QualityCheckType
 logger = logging.getLogger(__name__)
 
 
+class TaiwanFundamentalLagValidator(ValidationPlugin):
+    """Validates 60-day fundamental data lag for Taiwan market regulations."""
+    
+    def __init__(self, quarterly_lag_days: int = 60, annual_lag_days: int = 90):
+        self.quarterly_lag_days = quarterly_lag_days
+        self.annual_lag_days = annual_lag_days
+    
+    @property
+    def name(self) -> str:
+        return "taiwan_fundamental_lag_validator"
+    
+    @property
+    def version(self) -> str:
+        return "1.0.0"
+    
+    @property
+    def priority(self) -> ValidationPriority:
+        return ValidationPriority.CRITICAL
+    
+    @property
+    def supported_data_types(self) -> Set[DataType]:
+        return {DataType.FUNDAMENTAL}
+    
+    def can_validate(self, value: TemporalValue, context: ValidationContext) -> bool:
+        """Check if this validator can process the given value."""
+        return (
+            value.data_type == DataType.FUNDAMENTAL and
+            isinstance(value.value, dict) and
+            value.symbol is not None
+        )
+    
+    async def validate(self, value: TemporalValue, context: ValidationContext) -> ValidationOutput:
+        """Validate fundamental data reporting lag compliance."""
+        start_time = datetime.utcnow()
+        issues = []
+        
+        try:
+            # Extract fundamental data metadata
+            fundamental_data = value.value
+            fiscal_quarter = fundamental_data.get("fiscal_quarter")
+            report_date = value.value_date
+            announcement_date = value.as_of_date
+            
+            # Calculate actual lag
+            actual_lag_days = (announcement_date - report_date).days
+            
+            # Determine required lag based on reporting period
+            if fiscal_quarter == 4:  # Annual report
+                required_lag_days = self.annual_lag_days
+                period_type = "annual"
+            else:  # Quarterly report
+                required_lag_days = self.quarterly_lag_days
+                period_type = "quarterly"
+            
+            # Validate lag compliance
+            if actual_lag_days > required_lag_days:
+                issues.append(QualityIssue(
+                    check_type=QualityCheckType.TEMPORAL_CONSISTENCY,
+                    severity=SeverityLevel.ERROR,
+                    symbol=value.symbol,
+                    data_type=value.data_type,
+                    data_date=value.value_date,
+                    issue_date=datetime.utcnow(),
+                    description=f"Fundamental data lag {actual_lag_days} days exceeds Taiwan regulatory requirement of {required_lag_days} days for {period_type} report",
+                    details={
+                        "actual_lag_days": actual_lag_days,
+                        "required_lag_days": required_lag_days,
+                        "period_type": period_type,
+                        "fiscal_quarter": fiscal_quarter,
+                        "report_date": report_date.isoformat(),
+                        "announcement_date": announcement_date.isoformat()
+                    },
+                    suggested_action="Verify announcement date and regulatory filing timeline"
+                ))
+            elif actual_lag_days < 0:
+                # Future data - critical violation
+                issues.append(QualityIssue(
+                    check_type=QualityCheckType.TEMPORAL_CONSISTENCY,
+                    severity=SeverityLevel.CRITICAL,
+                    symbol=value.symbol,
+                    data_type=value.data_type,
+                    data_date=value.value_date,
+                    issue_date=datetime.utcnow(),
+                    description=f"Fundamental data has negative lag: announcement date before report date",
+                    details={
+                        "actual_lag_days": actual_lag_days,
+                        "report_date": report_date.isoformat(),
+                        "announcement_date": announcement_date.isoformat()
+                    },
+                    suggested_action="Correct announcement date - cannot be before report date"
+                ))
+            
+            result = ValidationResult.PASS if not issues else ValidationResult.FAIL
+            
+        except Exception as e:
+            logger.error(f"Error in Taiwan fundamental lag validation: {e}")
+            issues.append(QualityIssue(
+                check_type=QualityCheckType.VALIDITY,
+                severity=SeverityLevel.ERROR,
+                symbol=value.symbol or "",
+                data_type=value.data_type,
+                data_date=value.value_date,
+                issue_date=datetime.utcnow(),
+                description=f"Validation error: {str(e)}"
+            ))
+            result = ValidationResult.FAIL
+        
+        execution_time = (datetime.utcnow() - start_time).total_seconds() * 1000
+        
+        return ValidationOutput(
+            validator_name=self.name,
+            validation_id=f"{self.name}_{int(start_time.timestamp())}",
+            result=result,
+            issues=issues,
+            execution_time_ms=execution_time
+        )
+
+
+class TaiwanVolumeValidator(ValidationPlugin):
+    """Validates Taiwan market volume anomalies and spikes."""
+    
+    def __init__(self, volume_spike_threshold: float = 5.0, 
+                 zero_volume_severity: str = "warning"):
+        self.volume_spike_threshold = volume_spike_threshold
+        self.zero_volume_severity = zero_volume_severity
+        self._volume_history_cache: Dict[str, List[Tuple[date, int]]] = {}
+    
+    @property
+    def name(self) -> str:
+        return "taiwan_volume_validator"
+    
+    @property
+    def version(self) -> str:
+        return "1.0.0"
+    
+    @property
+    def priority(self) -> ValidationPriority:
+        return ValidationPriority.HIGH
+    
+    @property
+    def supported_data_types(self) -> Set[DataType]:
+        return {DataType.VOLUME, DataType.MARKET_DATA}
+    
+    def can_validate(self, value: TemporalValue, context: ValidationContext) -> bool:
+        """Check if this validator can process the given value."""
+        return value.data_type in self.supported_data_types and value.symbol is not None
+    
+    async def validate(self, value: TemporalValue, context: ValidationContext) -> ValidationOutput:
+        """Validate volume data for anomalies."""
+        start_time = datetime.utcnow()
+        issues = []
+        
+        try:
+            # Extract volume data
+            current_volume = None
+            
+            if value.data_type == DataType.VOLUME:
+                current_volume = int(value.value) if value.value is not None else None
+            elif value.data_type == DataType.MARKET_DATA and isinstance(value.value, dict):
+                current_volume = value.value.get("volume")
+                if current_volume is not None:
+                    current_volume = int(current_volume)
+            
+            if current_volume is None:
+                return ValidationOutput(
+                    validator_name=self.name,
+                    validation_id=f"{self.name}_{int(start_time.timestamp())}",
+                    result=ValidationResult.SKIP,
+                    metadata={"reason": "No volume data found"}
+                )
+            
+            # Check for negative volume
+            if current_volume < 0:
+                issues.append(QualityIssue(
+                    check_type=QualityCheckType.VALIDITY,
+                    severity=SeverityLevel.CRITICAL,
+                    symbol=value.symbol,
+                    data_type=value.data_type,
+                    data_date=value.value_date,
+                    issue_date=datetime.utcnow(),
+                    description=f"Negative volume detected: {current_volume}",
+                    details={"volume": current_volume},
+                    suggested_action="Correct volume data - cannot be negative"
+                ))
+            
+            # Check for zero volume
+            if current_volume == 0:
+                severity = SeverityLevel.WARNING if self.zero_volume_severity == "warning" else SeverityLevel.ERROR
+                issues.append(QualityIssue(
+                    check_type=QualityCheckType.BUSINESS_RULES,
+                    severity=severity,
+                    symbol=value.symbol,
+                    data_type=value.data_type,
+                    data_date=value.value_date,
+                    issue_date=datetime.utcnow(),
+                    description="Zero volume detected - potential trading suspension",
+                    details={"volume": current_volume},
+                    suggested_action="Verify trading status and market conditions"
+                ))
+            
+            # Calculate volume spike if historical data available
+            avg_volume = await self._get_average_volume(value.symbol, value.value_date, context)
+            
+            if avg_volume and avg_volume > 0 and current_volume > 0:
+                volume_ratio = current_volume / avg_volume
+                
+                if volume_ratio > self.volume_spike_threshold:
+                    severity = SeverityLevel.ERROR if volume_ratio > self.volume_spike_threshold * 2 else SeverityLevel.WARNING
+                    
+                    issues.append(QualityIssue(
+                        check_type=QualityCheckType.ANOMALY_DETECTION,
+                        severity=severity,
+                        symbol=value.symbol,
+                        data_type=value.data_type,
+                        data_date=value.value_date,
+                        issue_date=datetime.utcnow(),
+                        description=f"Volume spike detected: {volume_ratio:.1f}x average volume",
+                        details={
+                            "current_volume": current_volume,
+                            "average_volume": avg_volume,
+                            "volume_ratio": volume_ratio,
+                            "threshold": self.volume_spike_threshold
+                        },
+                        suggested_action="Investigate market news and trading conditions"
+                    ))
+            
+            result = ValidationResult.PASS if not issues else ValidationResult.WARNING
+            
+        except Exception as e:
+            logger.error(f"Error in Taiwan volume validation: {e}")
+            issues.append(QualityIssue(
+                check_type=QualityCheckType.VALIDITY,
+                severity=SeverityLevel.ERROR,
+                symbol=value.symbol or "",
+                data_type=value.data_type,
+                data_date=value.value_date,
+                issue_date=datetime.utcnow(),
+                description=f"Validation error: {str(e)}"
+            ))
+            result = ValidationResult.FAIL
+        
+        execution_time = (datetime.utcnow() - start_time).total_seconds() * 1000
+        
+        return ValidationOutput(
+            validator_name=self.name,
+            validation_id=f"{self.name}_{int(start_time.timestamp())}",
+            result=result,
+            issues=issues,
+            execution_time_ms=execution_time
+        )
+    
+    async def _get_average_volume(self, symbol: str, current_date: date, 
+                                context: ValidationContext) -> Optional[float]:
+        """Calculate 20-day average volume."""
+        volumes = []
+        
+        # Look for historical data in context
+        if context.historical_data:
+            for hist_value in context.historical_data:
+                if (hist_value.symbol == symbol and 
+                    hist_value.data_type in [DataType.VOLUME, DataType.MARKET_DATA] and
+                    hist_value.value_date < current_date):
+                    
+                    volume = None
+                    if hist_value.data_type == DataType.VOLUME:
+                        volume = int(hist_value.value) if hist_value.value else None
+                    elif isinstance(hist_value.value, dict):
+                        volume = hist_value.value.get("volume")
+                    
+                    if volume and volume > 0:
+                        volumes.append((hist_value.value_date, volume))
+        
+        # Sort by date and take last 20 trading days
+        volumes.sort(key=lambda x: x[0], reverse=True)
+        recent_volumes = [v[1] for v in volumes[:20]]
+        
+        if len(recent_volumes) >= 5:  # Need at least 5 days of data
+            return sum(recent_volumes) / len(recent_volumes)
+        
+        return None
+
+
+class TaiwanDataCompletenessValidator(ValidationPlugin):
+    """Validates data completeness for Taiwan market data."""
+    
+    def __init__(self, required_fields_by_type: Optional[Dict[DataType, Set[str]]] = None):
+        self.required_fields = required_fields_by_type or {
+            DataType.PRICE: {"close_price"},
+            DataType.VOLUME: {"volume"},
+            DataType.MARKET_DATA: {"open_price", "high_price", "low_price", "close_price", "volume"},
+            DataType.FUNDAMENTAL: {"revenue", "net_income", "fiscal_quarter", "fiscal_year"}
+        }
+    
+    @property
+    def name(self) -> str:
+        return "taiwan_data_completeness_validator"
+    
+    @property
+    def version(self) -> str:
+        return "1.0.0"
+    
+    @property
+    def priority(self) -> ValidationPriority:
+        return ValidationPriority.HIGH
+    
+    @property
+    def supported_data_types(self) -> Set[DataType]:
+        return set(self.required_fields.keys())
+    
+    def can_validate(self, value: TemporalValue, context: ValidationContext) -> bool:
+        """Check if this validator can process the given value."""
+        return value.data_type in self.supported_data_types
+    
+    async def validate(self, value: TemporalValue, context: ValidationContext) -> ValidationOutput:
+        """Validate data completeness."""
+        start_time = datetime.utcnow()
+        issues = []
+        
+        try:
+            required_fields = self.required_fields.get(value.data_type, set())
+            missing_fields = []
+            
+            if value.data_type in [DataType.MARKET_DATA, DataType.FUNDAMENTAL]:
+                # For complex data types, check if required fields are present and not None
+                if not isinstance(value.value, dict):
+                    issues.append(QualityIssue(
+                        check_type=QualityCheckType.COMPLETENESS,
+                        severity=SeverityLevel.ERROR,
+                        symbol=value.symbol or "",
+                        data_type=value.data_type,
+                        data_date=value.value_date,
+                        issue_date=datetime.utcnow(),
+                        description=f"Data value is not a dictionary for {value.data_type.value}",
+                        suggested_action="Verify data structure format"
+                    ))
+                else:
+                    for field in required_fields:
+                        field_value = value.value.get(field)
+                        if field_value is None or (isinstance(field_value, str) and field_value.strip() == ""):
+                            missing_fields.append(field)
+            else:
+                # For simple data types, check if value is present
+                if value.value is None:
+                    missing_fields.extend(required_fields)
+            
+            # Report missing fields
+            if missing_fields:
+                severity = SeverityLevel.ERROR if len(missing_fields) > len(required_fields) // 2 else SeverityLevel.WARNING
+                
+                issues.append(QualityIssue(
+                    check_type=QualityCheckType.COMPLETENESS,
+                    severity=severity,
+                    symbol=value.symbol or "",
+                    data_type=value.data_type,
+                    data_date=value.value_date,
+                    issue_date=datetime.utcnow(),
+                    description=f"Missing required fields: {', '.join(missing_fields)}",
+                    details={
+                        "missing_fields": missing_fields,
+                        "required_fields": list(required_fields),
+                        "completeness_score": 1.0 - (len(missing_fields) / len(required_fields))
+                    },
+                    suggested_action="Verify data source and collection process"
+                ))
+            
+            result = ValidationResult.PASS if not issues else ValidationResult.WARNING
+            
+        except Exception as e:
+            logger.error(f"Error in Taiwan data completeness validation: {e}")
+            issues.append(QualityIssue(
+                check_type=QualityCheckType.VALIDITY,
+                severity=SeverityLevel.ERROR,
+                symbol=value.symbol or "",
+                data_type=value.data_type,
+                data_date=value.value_date,
+                issue_date=datetime.utcnow(),
+                description=f"Validation error: {str(e)}"
+            ))
+            result = ValidationResult.FAIL
+        
+        execution_time = (datetime.utcnow() - start_time).total_seconds() * 1000
+        
+        return ValidationOutput(
+            validator_name=self.name,
+            validation_id=f"{self.name}_{int(start_time.timestamp())}",
+            result=result,
+            issues=issues,
+            execution_time_ms=execution_time
+        )
+
+
+class TaiwanDataConsistencyValidator(ValidationPlugin):
+    """Validates internal data consistency for Taiwan market data."""
+    
+    def __init__(self):
+        pass
+    
+    @property
+    def name(self) -> str:
+        return "taiwan_data_consistency_validator"
+    
+    @property
+    def version(self) -> str:
+        return "1.0.0"
+    
+    @property
+    def priority(self) -> ValidationPriority:
+        return ValidationPriority.HIGH
+    
+    @property
+    def supported_data_types(self) -> Set[DataType]:
+        return {DataType.MARKET_DATA, DataType.FUNDAMENTAL}
+    
+    def can_validate(self, value: TemporalValue, context: ValidationContext) -> bool:
+        """Check if this validator can process the given value."""
+        return (
+            value.data_type in self.supported_data_types and
+            isinstance(value.value, dict)
+        )
+    
+    async def validate(self, value: TemporalValue, context: ValidationContext) -> ValidationOutput:
+        """Validate internal data consistency."""
+        start_time = datetime.utcnow()
+        issues = []
+        
+        try:
+            data = value.value
+            
+            if value.data_type == DataType.MARKET_DATA:
+                issues.extend(await self._validate_market_data_consistency(data, value, context))
+            elif value.data_type == DataType.FUNDAMENTAL:
+                issues.extend(await self._validate_fundamental_consistency(data, value, context))
+            
+            result = ValidationResult.PASS if not issues else ValidationResult.WARNING
+            
+        except Exception as e:
+            logger.error(f"Error in Taiwan data consistency validation: {e}")
+            issues.append(QualityIssue(
+                check_type=QualityCheckType.VALIDITY,
+                severity=SeverityLevel.ERROR,
+                symbol=value.symbol or "",
+                data_type=value.data_type,
+                data_date=value.value_date,
+                issue_date=datetime.utcnow(),
+                description=f"Validation error: {str(e)}"
+            ))
+            result = ValidationResult.FAIL
+        
+        execution_time = (datetime.utcnow() - start_time).total_seconds() * 1000
+        
+        return ValidationOutput(
+            validator_name=self.name,
+            validation_id=f"{self.name}_{int(start_time.timestamp())}",
+            result=result,
+            issues=issues,
+            execution_time_ms=execution_time
+        )
+    
+    async def _validate_market_data_consistency(self, data: Dict[str, Any], 
+                                              value: TemporalValue, 
+                                              context: ValidationContext) -> List[QualityIssue]:
+        """Validate market data internal consistency."""
+        issues = []
+        
+        # Extract price fields
+        open_price = data.get("open_price")
+        high_price = data.get("high_price")
+        low_price = data.get("low_price")
+        close_price = data.get("close_price")
+        volume = data.get("volume")
+        turnover = data.get("turnover")
+        
+        # Convert to Decimal for precise comparison
+        def to_decimal(val):
+            return Decimal(str(val)) if val is not None else None
+        
+        open_dec = to_decimal(open_price)
+        high_dec = to_decimal(high_price)
+        low_dec = to_decimal(low_price)
+        close_dec = to_decimal(close_price)
+        
+        # Check OHLC relationships
+        if high_dec and low_dec and high_dec < low_dec:
+            issues.append(QualityIssue(
+                check_type=QualityCheckType.ACCURACY,
+                severity=SeverityLevel.ERROR,
+                symbol=value.symbol or "",
+                data_type=value.data_type,
+                data_date=value.value_date,
+                issue_date=datetime.utcnow(),
+                description=f"High price {high_price} is less than low price {low_price}",
+                details={"high_price": float(high_dec), "low_price": float(low_dec)},
+                suggested_action="Verify OHLC data integrity"
+            ))
+        
+        # Check if open/close are within high/low range
+        for price_name, price_val in [("open", open_dec), ("close", close_dec)]:
+            if price_val and high_dec and low_dec:
+                if price_val > high_dec or price_val < low_dec:
+                    issues.append(QualityIssue(
+                        check_type=QualityCheckType.ACCURACY,
+                        severity=SeverityLevel.ERROR,
+                        symbol=value.symbol or "",
+                        data_type=value.data_type,
+                        data_date=value.value_date,
+                        issue_date=datetime.utcnow(),
+                        description=f"{price_name.capitalize()} price {price_val} is outside high-low range [{low_price}, {high_price}]",
+                        details={
+                            f"{price_name}_price": float(price_val),
+                            "high_price": float(high_dec),
+                            "low_price": float(low_dec)
+                        },
+                        suggested_action="Verify price data accuracy"
+                    ))
+        
+        # Check volume and turnover consistency
+        if volume and turnover and close_dec:
+            # Simple check: turnover should be roughly volume * average_price
+            avg_price = (high_dec + low_dec + open_dec + close_dec) / 4 if all([high_dec, low_dec, open_dec, close_dec]) else close_dec
+            expected_turnover = volume * avg_price
+            turnover_decimal = to_decimal(turnover)
+            
+            # Allow 10% variance for turnover calculation
+            if abs(turnover_decimal - expected_turnover) / expected_turnover > 0.1:
+                issues.append(QualityIssue(
+                    check_type=QualityCheckType.ACCURACY,
+                    severity=SeverityLevel.WARNING,
+                    symbol=value.symbol or "",
+                    data_type=value.data_type,
+                    data_date=value.value_date,
+                    issue_date=datetime.utcnow(),
+                    description=f"Turnover {turnover} inconsistent with volume {volume} and average price {avg_price}",
+                    details={
+                        "volume": volume,
+                        "turnover": float(turnover_decimal),
+                        "expected_turnover": float(expected_turnover),
+                        "variance_pct": float(abs(turnover_decimal - expected_turnover) / expected_turnover)
+                    },
+                    suggested_action="Verify volume and turnover calculation"
+                ))
+        
+        return issues
+    
+    async def _validate_fundamental_consistency(self, data: Dict[str, Any], 
+                                              value: TemporalValue, 
+                                              context: ValidationContext) -> List[QualityIssue]:
+        """Validate fundamental data internal consistency."""
+        issues = []
+        
+        # Extract fundamental fields
+        revenue = data.get("revenue")
+        operating_income = data.get("operating_income")
+        net_income = data.get("net_income")
+        total_assets = data.get("total_assets")
+        total_equity = data.get("total_equity")
+        eps = data.get("eps")
+        roe = data.get("roe")
+        
+        # Check logical relationships
+        if operating_income and revenue:
+            if operating_income > revenue:
+                issues.append(QualityIssue(
+                    check_type=QualityCheckType.ACCURACY,
+                    severity=SeverityLevel.ERROR,
+                    symbol=value.symbol or "",
+                    data_type=value.data_type,
+                    data_date=value.value_date,
+                    issue_date=datetime.utcnow(),
+                    description=f"Operating income {operating_income} exceeds revenue {revenue}",
+                    details={"operating_income": operating_income, "revenue": revenue},
+                    suggested_action="Verify financial statement data"
+                ))
+        
+        if total_assets and total_equity:
+            if total_equity > total_assets:
+                issues.append(QualityIssue(
+                    check_type=QualityCheckType.ACCURACY,
+                    severity=SeverityLevel.ERROR,
+                    symbol=value.symbol or "",
+                    data_type=value.data_type,
+                    data_date=value.value_date,
+                    issue_date=datetime.utcnow(),
+                    description=f"Total equity {total_equity} exceeds total assets {total_assets}",
+                    details={"total_equity": total_equity, "total_assets": total_assets},
+                    suggested_action="Verify balance sheet data"
+                ))
+        
+        # Check ROE calculation if all components are available
+        if roe and net_income and total_equity and total_equity != 0:
+            calculated_roe = net_income / total_equity
+            roe_variance = abs(roe - calculated_roe) / abs(calculated_roe) if calculated_roe != 0 else 1
+            
+            if roe_variance > 0.05:  # 5% tolerance
+                issues.append(QualityIssue(
+                    check_type=QualityCheckType.ACCURACY,
+                    severity=SeverityLevel.WARNING,
+                    symbol=value.symbol or "",
+                    data_type=value.data_type,
+                    data_date=value.value_date,
+                    issue_date=datetime.utcnow(),
+                    description=f"ROE {roe:.4f} inconsistent with calculated ROE {calculated_roe:.4f}",
+                    details={
+                        "reported_roe": roe,
+                        "calculated_roe": calculated_roe,
+                        "net_income": net_income,
+                        "total_equity": total_equity,
+                        "variance_pct": roe_variance
+                    },
+                    suggested_action="Verify ROE calculation method"
+                ))
+        
+        return issues
+
+
+logger = logging.getLogger(__name__)
+
+
 class TaiwanPriceLimitValidator(ValidationPlugin):
     """Validates Taiwan market price limits (10% daily limit)."""
     
@@ -859,11 +1476,58 @@ class TaiwanFundamentalLagValidator(ValidationPlugin):
 # Factory function to create Taiwan validators
 
 def create_taiwan_validators() -> List[ValidationPlugin]:
-    """Create a standard set of Taiwan market validators."""
+    """Create a comprehensive set of Taiwan market validators for Stream A requirements."""
     return [
-        TaiwanPriceLimitValidator(),
-        TaiwanVolumeValidator(),
+        # Core Taiwan market validators
+        TaiwanPriceLimitValidator(daily_limit_pct=0.10),
+        TaiwanVolumeValidator(spike_threshold=5.0),
         TaiwanTradingHoursValidator(),
         TaiwanSettlementValidator(),
-        TaiwanFundamentalLagValidator()
+        
+        # New Stream A validators for comprehensive data quality
+        TaiwanFundamentalLagValidator(quarterly_lag_days=60, annual_lag_days=90),
+        TaiwanDataCompletenessValidator(),
+        TaiwanDataConsistencyValidator(),
     ]
+
+
+def create_taiwan_validation_registry() -> 'ValidationRegistry':
+    """Create a validation registry configured for Taiwan market requirements."""
+    from .validation_engine import ValidationRegistry
+    
+    registry = ValidationRegistry()
+    
+    # Register all Taiwan validators
+    validators = create_taiwan_validators()
+    
+    for validator in validators:
+        # Define dependencies for some validators
+        dependencies = set()
+        
+        if validator.name == "taiwan_data_consistency_validator":
+            # Consistency checks should run after completeness
+            dependencies.add("taiwan_data_completeness_validator")
+        
+        registry.register_plugin(validator, dependencies=dependencies)
+    
+    return registry
+
+
+def create_optimized_taiwan_engine(temporal_store: 'TemporalStore') -> 'ValidationEngine':
+    """Create a high-performance validation engine optimized for Taiwan market real-time validation."""
+    from .validation_engine import ValidationEngine
+    
+    registry = create_taiwan_validation_registry()
+    
+    # Optimized for <10ms latency requirements
+    engine = ValidationEngine(
+        registry=registry,
+        temporal_store=temporal_store,
+        max_workers=8,           # Higher parallelism
+        timeout_ms=5000,         # 5s timeout for fail-fast
+        enable_async=True,       # Async processing
+        enable_fast_path=True,   # Fast-path optimizations
+        max_cache_size=50000     # Large cache for better hit rates
+    )
+    
+    return engine

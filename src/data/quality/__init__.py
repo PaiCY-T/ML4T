@@ -46,13 +46,23 @@ from .metrics import (
     QualityTrend, SLAMetric, SLAResult, SLAStatus, MetricType,
     create_taiwan_metrics_system
 )
-from .dashboard import (
-    QualityDashboard, DashboardData, create_taiwan_dashboard,
-    setup_complete_monitoring_system
-)
-from .reporting import (
-    ReportGenerator, ReportScheduler, setup_automated_reporting, generate_manual_report
-)
+# Dashboard imports - optional due to Flask dependency
+try:
+    from .dashboard import (
+        QualityDashboard, DashboardData, create_taiwan_dashboard,
+        setup_complete_monitoring_system
+    )
+except ImportError:
+    # Dashboard not available - Flask not installed
+    pass
+# Reporting imports - optional due to schedule dependency
+try:
+    from .reporting import (
+        ReportGenerator, ReportScheduler, setup_automated_reporting, generate_manual_report
+    )
+except ImportError:
+    # Reporting not available - schedule not installed
+    pass
 
 __all__ = [
     # Core validation

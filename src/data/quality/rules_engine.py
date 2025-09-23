@@ -669,10 +669,116 @@ rules:
     tags: ["taiwan", "timing"]
 """
 
+# Enhanced Taiwan market validation rules for Stream A requirements
+
+def create_taiwan_fundamental_lag_rules() -> List[ValidationRule]:
+    """Create Taiwan-specific fundamental data lag validation rules for 60-day requirement."""
+    rules = []
+    
+    # Quarterly report lag rule (60 days max)
+    rules.append(ValidationRule(
+        name="taiwan_quarterly_fundamental_lag",
+        description="Taiwan quarterly fundamental data must be available within 60 days",
+        data_types={DataType.FUNDAMENTAL},
+        conditions=[
+            RuleCondition(
+                field_path="value.fiscal_quarter",
+                operator=RuleOperator.IN,
+                value=[1, 2, 3],  # Q1, Q2, Q3
+                description="Applies to quarterly reports (not annual)"
+            ),
+            RuleCondition(
+                field_path="metadata.lag_days",
+                operator=RuleOperator.GT,
+                value=60,
+                description="Lag exceeds 60 days"
+            )
+        ],
+        action=RuleAction.CRITICAL,
+        enabled=True,
+        tags={"taiwan", "fundamental", "lag", "regulatory"},
+        metadata={
+            "regulation": "Taiwan Securities and Exchange Act",
+            "max_lag_days": 60,
+            "suggested_action": "Verify quarterly report filing timeline with Taiwan regulators"
+        }
+    ))
+    
+    # Annual report lag rule (90 days max)
+    rules.append(ValidationRule(
+        name="taiwan_annual_fundamental_lag",
+        description="Taiwan annual fundamental data must be available within 90 days",
+        data_types={DataType.FUNDAMENTAL},
+        conditions=[
+            RuleCondition(
+                field_path="value.fiscal_quarter",
+                operator=RuleOperator.EQ,
+                value=4,  # Q4 = Annual report
+                description="Applies to annual reports"
+            ),
+            RuleCondition(
+                field_path="metadata.lag_days",
+                operator=RuleOperator.GT,
+                value=90,
+                description="Lag exceeds 90 days"
+            )
+        ],
+        action=RuleAction.CRITICAL,
+        enabled=True,
+        tags={"taiwan", "fundamental", "lag", "regulatory", "annual"},
+        metadata={
+            "regulation": "Taiwan Securities and Exchange Act",
+            "max_lag_days": 90,
+            "suggested_action": "Verify annual report filing timeline with Taiwan regulators"
+        }
+    ))
+    
+    # Future fundamental data rule (look-ahead bias prevention)
+    rules.append(ValidationRule(
+        name="taiwan_fundamental_future_data",
+        description="Fundamental data cannot have negative lag (future data)",
+        data_types={DataType.FUNDAMENTAL},
+        conditions=[
+            RuleCondition(
+                field_path="metadata.lag_days",
+                operator=RuleOperator.LT,
+                value=0,
+                description="Negative lag indicates future data"
+            )
+        ],
+        action=RuleAction.CRITICAL,
+        enabled=True,
+        tags={"taiwan", "fundamental", "temporal", "look_ahead_bias"},
+        metadata={
+            "suggested_action": "Correct announcement date - cannot be before report date"
+        }
+    ))
+    
+    return rules
+
+
+def create_enhanced_taiwan_rules_engine() -> RulesEngine:
+    """Create an enhanced rules engine with comprehensive Taiwan market validation rules."""
+    engine = RulesEngine()
+    
+    # Add Stream A enhanced rules
+    taiwan_rules = create_taiwan_fundamental_lag_rules()
+    
+    for rule in taiwan_rules:
+        engine.add_rule(rule)
+    
+    logger.info(f"Created enhanced Taiwan rules engine with {len(taiwan_rules)} new fundamental lag rules")
+    return engine
+
+
 if __name__ == "__main__":
     # Example usage
     engine = create_rules_engine_with_taiwan_rules()
     print(f"Rules engine created with {len(engine.list_rules())} rules")
+    
+    # Create enhanced engine for Stream A requirements
+    enhanced_engine = create_enhanced_taiwan_rules_engine()
+    print(f"Enhanced engine created with {len(enhanced_engine.list_rules())} fundamental lag rules")
     
     # Example of loading from YAML
     # engine.load_rules_from_yaml("taiwan_rules.yaml")
