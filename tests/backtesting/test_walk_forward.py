@@ -22,9 +22,19 @@ from src.backtesting.validation.walk_forward import (
     ValidationStatus,
     create_default_config
 )
+from src.backtesting.integration.pit_validator import (
+    PITValidator,
+    PITBiasDetector,
+    BiasCheckResult,
+    PITValidationConfig,
+    BiasType,
+    ValidationLevel,
+    create_strict_pit_validator
+)
 from src.data.core.temporal import TemporalStore, DataType, TemporalValue
 from src.data.models.taiwan_market import TaiwanTradingCalendar
 from src.data.pipeline.pit_engine import PointInTimeEngine, BiasCheckLevel
+from src.data.quality.validation_engine import ValidationEngine, QualityMonitor
 
 
 class TestWalkForwardConfig:
@@ -602,6 +612,477 @@ class TestIntegration:
         
         assert adjusted.weekday() == 0  # Should be Monday
         assert taiwan_calendar.is_trading_day.called
+
+
+class TestPITValidationConfig:
+    """Test PITValidationConfig class."""
+    
+    def test_default_config(self):
+        """Test default PIT validation configuration."""
+        config = PITValidationConfig()
+        
+        assert config.bias_check_level == BiasCheckLevel.STRICT
+        assert config.validation_level == ValidationLevel.STRICT
+        assert config.enable_look_ahead_detection is True
+        assert config.enable_survivorship_detection is True
+        assert config.max_concurrent_validations == 4
+        assert config.min_data_completeness == 0.95
+        assert config.require_quality_validation is True
+    
+    def test_custom_config(self):
+        """Test custom PIT validation configuration."""
+        config = PITValidationConfig(
+            validation_level=ValidationLevel.PARANOID,
+            max_concurrent_validations=8,
+            min_data_completeness=0.99
+        )
+        
+        assert config.validation_level == ValidationLevel.PARANOID
+        assert config.max_concurrent_validations == 8
+        assert config.min_data_completeness == 0.99
+    
+    def test_config_validation(self):
+        """Test configuration validation."""
+        with pytest.raises(ValueError):
+            PITValidationConfig(max_concurrent_validations=0)
+        
+        with pytest.raises(ValueError):
+            PITValidationConfig(validation_timeout_seconds=-1)
+        
+        with pytest.raises(ValueError):
+            PITValidationConfig(min_data_completeness=1.5)
+
+
+class TestPITBiasDetector:
+    """Test PITBiasDetector class."""
+    
+    @pytest.fixture
+    def mock_pit_engine(self):
+        """Create mock PIT engine for bias detection."""
+        mock_engine = Mock(spec=PointInTimeEngine)
+        mock_engine.query.return_value = {}
+        return mock_engine
+    
+    @pytest.fixture
+    def mock_taiwan_calendar(self):
+        """Create mock Taiwan calendar."""
+        calendar = Mock(spec=TaiwanTradingCalendar)
+        calendar.is_trading_day.return_value = True
+        return calendar
+    
+    @pytest.fixture
+    def bias_detector(self, mock_pit_engine, mock_taiwan_calendar):
+        """Create PITBiasDetector instance."""
+        return PITBiasDetector(mock_pit_engine, mock_taiwan_calendar)
+    
+    @pytest.fixture
+    def sample_window(self):
+        """Create sample validation window."""
+        return ValidationWindow(
+            window_id="test_bias_001",
+            train_start=date(2020, 1, 1),
+            train_end=date(2020, 12, 31),
+            test_start=date(2021, 1, 15),
+            test_end=date(2021, 6, 30),
+            purge_start=date(2021, 1, 1),
+            purge_end=date(2021, 1, 14),
+            window_number=1,
+            total_train_days=365,
+            total_test_days=166,
+            purge_days=14,
+            trading_days_train=252,
+            trading_days_test=120
+        )
+    
+    def test_no_bias_detected(self, bias_detector, sample_window, mock_pit_engine):
+        """Test when no bias is detected."""
+        # Mock no future data available (correct behavior)
+        mock_pit_engine.query.return_value = {}
+        
+        symbols = ["2330.TW"]
+        data_types = [DataType.PRICE]
+        
+        results = bias_detector.detect_all_biases(
+            sample_window, symbols, data_types, ValidationLevel.STRICT
+        )
+        
+        # Should return empty list or results with detected=False
+        detected_biases = [r for r in results if r.detected]
+        assert len(detected_biases) == 0
+    
+    def test_look_ahead_bias_detected(self, bias_detector, sample_window, mock_pit_engine):
+        """Test look-ahead bias detection."""
+        # Mock future data being available (incorrect behavior)
+        mock_temporal_value = TemporalValue(
+            value=100.0,
+            as_of_date=date(2020, 12, 31),
+            value_date=date(2021, 2, 1),  # Future date
+            data_type=DataType.PRICE,
+            symbol="2330.TW"
+        )
+        mock_pit_engine.query.return_value = {"2330.TW": [mock_temporal_value]}
+        
+        symbols = ["2330.TW"]
+        data_types = [DataType.PRICE]
+        
+        results = bias_detector.detect_all_biases(
+            sample_window, symbols, data_types, ValidationLevel.STRICT
+        )
+        
+        # Should detect look-ahead bias
+        look_ahead_results = [r for r in results if r.bias_type == BiasType.LOOK_AHEAD and r.detected]
+        assert len(look_ahead_results) > 0
+        assert look_ahead_results[0].severity == "critical"
+    
+    def test_survivorship_bias_detection(self, bias_detector, sample_window, mock_pit_engine):
+        """Test survivorship bias detection."""
+        # Mock corporate action data indicating delisting
+        mock_ca_value = TemporalValue(
+            value="DELISTING",
+            as_of_date=date(2021, 3, 1),
+            value_date=date(2021, 3, 1),
+            data_type=DataType.CORPORATE_ACTION,
+            symbol="2330.TW",
+            metadata={'action_type': 'DELISTING'}
+        )
+        mock_pit_engine.query.return_value = {"2330.TW": [mock_ca_value]}
+        
+        symbols = ["2330.TW"]
+        
+        results = bias_detector.detect_all_biases(
+            sample_window, symbols, [DataType.PRICE], ValidationLevel.STRICT
+        )
+        
+        # Should detect survivorship bias
+        survivorship_results = [r for r in results if r.bias_type == BiasType.SURVIVORSHIP and r.detected]
+        assert len(survivorship_results) > 0
+    
+    def test_temporal_leakage_detection(self, bias_detector, sample_window, mock_pit_engine):
+        """Test temporal leakage detection."""
+        # Mock data with impossible temporal ordering
+        mock_temporal_value = TemporalValue(
+            value=100.0,
+            as_of_date=date(2020, 6, 1),  # Available before it should be
+            value_date=date(2020, 6, 30),
+            data_type=DataType.FUNDAMENTAL,  # Should have 60-day lag
+            symbol="2330.TW"
+        )
+        mock_pit_engine.query.return_value = {"2330.TW": [mock_temporal_value]}
+        
+        symbols = ["2330.TW"]
+        data_types = [DataType.FUNDAMENTAL]
+        
+        results = bias_detector.detect_all_biases(
+            sample_window, symbols, data_types, ValidationLevel.STRICT
+        )
+        
+        # Should detect temporal leakage
+        temporal_results = [r for r in results if r.bias_type == BiasType.TEMPORAL_LEAKAGE and r.detected]
+        assert len(temporal_results) > 0
+
+
+class TestPITValidator:
+    """Test PITValidator integration class."""
+    
+    @pytest.fixture
+    def mock_dependencies(self):
+        """Create mock dependencies for PITValidator."""
+        temporal_store = Mock(spec=TemporalStore)
+        pit_engine = Mock(spec=PointInTimeEngine)
+        validation_engine = Mock(spec=ValidationEngine)
+        quality_monitor = Mock(spec=QualityMonitor)
+        taiwan_calendar = Mock(spec=TaiwanTradingCalendar)
+        
+        # Configure mocks
+        pit_engine.check_data_availability.return_value = True
+        pit_engine.query.return_value = {}
+        quality_monitor.check_data_completeness.return_value = 0.98
+        quality_monitor.calculate_quality_score.return_value = 0.85
+        taiwan_calendar.is_trading_day.return_value = True
+        
+        return {
+            'temporal_store': temporal_store,
+            'pit_engine': pit_engine,
+            'validation_engine': validation_engine,
+            'quality_monitor': quality_monitor,
+            'taiwan_calendar': taiwan_calendar
+        }
+    
+    @pytest.fixture
+    def pit_validator(self, mock_dependencies):
+        """Create PITValidator instance."""
+        config = PITValidationConfig(
+            validation_level=ValidationLevel.STRICT,
+            enable_parallel_processing=False  # Disable for testing
+        )
+        
+        return PITValidator(
+            config=config,
+            temporal_store=mock_dependencies['temporal_store'],
+            pit_engine=mock_dependencies['pit_engine'],
+            validation_engine=mock_dependencies['validation_engine'],
+            quality_monitor=mock_dependencies['quality_monitor'],
+            taiwan_calendar=mock_dependencies['taiwan_calendar']
+        )
+    
+    def test_validator_initialization(self, pit_validator):
+        """Test PITValidator initialization."""
+        assert pit_validator.config.validation_level == ValidationLevel.STRICT
+        assert pit_validator.temporal_store is not None
+        assert pit_validator.pit_engine is not None
+        assert pit_validator.validation_engine is not None
+        assert pit_validator.quality_monitor is not None
+        assert pit_validator.bias_detector is not None
+    
+    def test_walk_forward_scenario_validation(self, pit_validator):
+        """Test comprehensive walk-forward scenario validation."""
+        wf_config = WalkForwardConfig(
+            train_weeks=52,
+            test_weeks=13,
+            purge_weeks=1,
+            rebalance_weeks=4,
+            min_history_weeks=104
+        )
+        
+        symbols = ["2330.TW", "2317.TW"]
+        start_date = date(2020, 1, 1)
+        end_date = date(2022, 12, 31)
+        data_types = [DataType.PRICE, DataType.VOLUME]
+        
+        # Run validation
+        result = pit_validator.validate_walk_forward_scenario(
+            wf_config=wf_config,
+            symbols=symbols,
+            start_date=start_date,
+            end_date=end_date,
+            data_types=data_types,
+            enable_performance_validation=True
+        )
+        
+        # Verify result structure
+        assert 'validation_summary' in result
+        assert 'windows' in result
+        assert 'validation_results' in result
+        assert 'bias_detection_results' in result
+        assert 'quality_validation_results' in result
+        assert 'performance_validation_results' in result
+        assert 'summary_statistics' in result
+        
+        # Verify summary content
+        summary = result['validation_summary']
+        assert summary['total_windows'] > 0
+        assert summary['total_runtime_seconds'] > 0
+        assert 'successful_validations' in summary
+    
+    def test_single_window_validation(self, pit_validator):
+        """Test single window validation."""
+        window = ValidationWindow(
+            window_id="test_pit_001",
+            train_start=date(2020, 1, 1),
+            train_end=date(2020, 12, 31),
+            test_start=date(2021, 1, 15),
+            test_end=date(2021, 6, 30),
+            purge_start=date(2021, 1, 1),
+            purge_end=date(2021, 1, 14),
+            window_number=1,
+            total_train_days=365,
+            total_test_days=166,
+            purge_days=14,
+            trading_days_train=252,
+            trading_days_test=120
+        )
+        
+        symbols = ["2330.TW"]
+        data_types = [DataType.PRICE]
+        
+        result = pit_validator._validate_single_window(
+            window, symbols, data_types, enable_performance_validation=True
+        )
+        
+        # Verify result structure
+        assert 'validation' in result
+        assert 'bias' in result
+        assert 'quality' in result
+        assert 'performance' in result
+        
+        # Verify validation success
+        assert result['validation']['success'] is True
+    
+    def test_bias_detection_integration(self, pit_validator, mock_dependencies):
+        """Test bias detection integration."""
+        # Configure mock to return future data (bias scenario)
+        future_data = {
+            "2330.TW": [TemporalValue(
+                value=100.0,
+                as_of_date=date(2020, 12, 31),
+                value_date=date(2021, 2, 1),
+                data_type=DataType.PRICE,
+                symbol="2330.TW"
+            )]
+        }
+        mock_dependencies['pit_engine'].query.return_value = future_data
+        
+        window = ValidationWindow(
+            window_id="test_bias_001",
+            train_start=date(2020, 1, 1),
+            train_end=date(2020, 12, 31),
+            test_start=date(2021, 1, 15),
+            test_end=date(2021, 6, 30),
+            purge_start=date(2021, 1, 1),
+            purge_end=date(2021, 1, 14),
+            window_number=1,
+            total_train_days=365,
+            total_test_days=166,
+            purge_days=14,
+            trading_days_train=252,
+            trading_days_test=120
+        )
+        
+        symbols = ["2330.TW"]
+        data_types = [DataType.PRICE]
+        
+        result = pit_validator._validate_single_window(
+            window, symbols, data_types, enable_performance_validation=False
+        )
+        
+        # Should detect bias and mark validation as failed
+        assert len(result['bias']) > 0
+        bias_detected = any(bias['detected'] for bias in result['bias'])
+        assert bias_detected
+        
+        # Critical bias should cause validation failure
+        critical_bias = any(bias['severity'] == 'critical' for bias in result['bias'])
+        if critical_bias:
+            assert result['validation']['success'] is False
+    
+    def test_quality_validation_integration(self, pit_validator, mock_dependencies):
+        """Test quality validation integration."""
+        # Configure mock to return low data completeness
+        mock_dependencies['quality_monitor'].check_data_completeness.return_value = 0.50  # Below threshold
+        
+        window = ValidationWindow(
+            window_id="test_quality_001",
+            train_start=date(2020, 1, 1),
+            train_end=date(2020, 12, 31),
+            test_start=date(2021, 1, 15),
+            test_end=date(2021, 6, 30),
+            purge_start=date(2021, 1, 1),
+            purge_end=date(2021, 1, 14),
+            window_number=1,
+            total_train_days=365,
+            total_test_days=166,
+            purge_days=14,
+            trading_days_train=252,
+            trading_days_test=120
+        )
+        
+        symbols = ["2330.TW"]
+        data_types = [DataType.PRICE]
+        
+        result = pit_validator._validate_single_window(
+            window, symbols, data_types, enable_performance_validation=False
+        )
+        
+        # Should detect quality issues
+        assert len(result['quality']) > 0
+        quality_issues = [q for q in result['quality'] if q.get('type') == 'data_completeness']
+        assert len(quality_issues) > 0
+    
+    def test_health_score_calculation(self, pit_validator):
+        """Test overall health score calculation."""
+        # Create mock comprehensive result
+        comprehensive_result = {
+            'validation_summary': {
+                'total_windows': 10,
+                'successful_validations': 8,
+                'total_runtime_seconds': 100.0
+            },
+            'bias_detection_results': [
+                [{'severity': 'medium'}, {'severity': 'low'}],  # Window 1
+                [{'severity': 'critical'}],                      # Window 2
+                []                                               # Window 3
+            ],
+            'quality_validation_results': [
+                [{'severity': 'high'}],   # Window 1
+                [],                       # Window 2
+                [{'severity': 'low'}]     # Window 3
+            ]
+        }
+        
+        health_score = pit_validator._calculate_health_score(comprehensive_result)
+        
+        # Should be less than 100 due to issues
+        assert 0 <= health_score <= 100
+        assert health_score < 80  # Should be penalized for critical bias
+
+
+class TestPITIntegrationUtilities:
+    """Test utility functions for PIT integration."""
+    
+    @pytest.fixture
+    def mock_temporal_store(self):
+        """Create mock temporal store."""
+        return Mock(spec=TemporalStore)
+    
+    def test_create_standard_pit_validator(self, mock_temporal_store):
+        """Test creating standard PIT validator."""
+        validator = create_strict_pit_validator(mock_temporal_store)
+        
+        assert isinstance(validator, PITValidator)
+        assert validator.config.validation_level == ValidationLevel.STRICT
+        assert validator.config.enable_look_ahead_detection is True
+        assert validator.config.require_quality_validation is True
+    
+    def test_create_strict_pit_validator_with_overrides(self, mock_temporal_store):
+        """Test creating strict PIT validator with config overrides."""
+        validator = create_strict_pit_validator(
+            mock_temporal_store,
+            max_concurrent_validations=8,
+            min_data_completeness=0.99
+        )
+        
+        assert validator.config.max_concurrent_validations == 8
+        assert validator.config.min_data_completeness == 0.99
+        assert validator.config.validation_level == ValidationLevel.STRICT  # Default preserved
+
+
+class TestBiasCheckResult:
+    """Test BiasCheckResult class."""
+    
+    def test_bias_check_result_creation(self):
+        """Test creating bias check result."""
+        result = BiasCheckResult(
+            bias_type=BiasType.LOOK_AHEAD,
+            detected=True,
+            severity="critical",
+            description="Look-ahead bias detected in price data",
+            affected_windows=["window_001"],
+            affected_symbols=["2330.TW"],
+            remediation="Review data access patterns",
+            confidence=0.95
+        )
+        
+        assert result.bias_type == BiasType.LOOK_AHEAD
+        assert result.detected is True
+        assert result.severity == "critical"
+        assert result.confidence == 0.95
+    
+    def test_bias_check_result_serialization(self):
+        """Test bias check result serialization."""
+        result = BiasCheckResult(
+            bias_type=BiasType.SURVIVORSHIP,
+            detected=False,
+            severity="low",
+            description="No survivorship bias detected",
+            confidence=0.80
+        )
+        
+        result_dict = result.to_dict()
+        
+        assert result_dict['bias_type'] == 'survivorship'
+        assert result_dict['detected'] is False
+        assert result_dict['severity'] == "low"
+        assert result_dict['confidence'] == 0.80
 
 
 if __name__ == "__main__":

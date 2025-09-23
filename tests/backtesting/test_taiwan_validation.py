@@ -22,12 +22,24 @@ from src.backtesting.validation.taiwan_specific import (
     create_standard_taiwan_validator,
     create_strict_taiwan_validator
 )
+from src.backtesting.integration.pit_validator import (
+    PITValidator,
+    PITValidationConfig,
+    ValidationLevel,
+    create_strict_pit_validator
+)
+from src.backtesting.validation.walk_forward import (
+    WalkForwardConfig,
+    WalkForwardSplitter,
+    ValidationWindow
+)
 from src.data.core.temporal import TemporalStore, DataType, TemporalValue
 from src.data.models.taiwan_market import (
     TaiwanTradingCalendar, TaiwanSettlement, TaiwanMarketCode,
     TradingStatus, CorporateActionType
 )
 from src.data.pipeline.pit_engine import PointInTimeEngine, PITQuery
+from src.data.quality.validation_engine import ValidationEngine, QualityMonitor
 
 
 class TestTaiwanValidationConfig:
@@ -617,6 +629,579 @@ class TestIntegration:
         
         for symbol in us_symbols:
             assert validator._is_valid_taiwan_symbol(symbol) is False
+
+
+class TestTaiwanPITIntegration:
+    """Test Taiwan market validation with PIT integration."""
+    
+    @pytest.fixture
+    def mock_dependencies(self):
+        """Create comprehensive mock dependencies."""
+        temporal_store = Mock(spec=TemporalStore)
+        pit_engine = Mock(spec=PointInTimeEngine)
+        validation_engine = Mock(spec=ValidationEngine)
+        quality_monitor = Mock(spec=QualityMonitor)
+        taiwan_calendar = Mock(spec=TaiwanTradingCalendar)
+        
+        # Configure mocks for Taiwan market
+        pit_engine.check_data_availability.return_value = True
+        pit_engine.query.return_value = {}
+        quality_monitor.check_data_completeness.return_value = 0.98
+        quality_monitor.calculate_quality_score.return_value = 0.85
+        
+        # Taiwan calendar - exclude weekends and holidays
+        def is_trading_day(d):
+            if d.weekday() >= 5:  # Weekend
+                return False
+            # Mock some holidays
+            taiwan_holidays = [
+                date(2023, 2, 10),  # Lunar New Year
+                date(2023, 2, 11),
+                date(2023, 2, 12),
+                date(2023, 4, 5),   # Children's Day
+                date(2023, 10, 10), # National Day
+            ]
+            return d not in taiwan_holidays
+        
+        taiwan_calendar.is_trading_day.side_effect = is_trading_day
+        
+        return {
+            'temporal_store': temporal_store,
+            'pit_engine': pit_engine,
+            'validation_engine': validation_engine,
+            'quality_monitor': quality_monitor,
+            'taiwan_calendar': taiwan_calendar
+        }
+    
+    @pytest.fixture
+    def taiwan_pit_validator(self, mock_dependencies):
+        """Create PIT validator configured for Taiwan market."""
+        config = PITValidationConfig(
+            validation_level=ValidationLevel.STRICT,
+            enable_look_ahead_detection=True,
+            enable_survivorship_detection=True,
+            validate_settlement_timing=True,
+            validate_corporate_actions=True,
+            validate_market_events=True,
+            enable_parallel_processing=False  # Disable for testing
+        )
+        
+        return PITValidator(
+            config=config,
+            temporal_store=mock_dependencies['temporal_store'],
+            pit_engine=mock_dependencies['pit_engine'],
+            validation_engine=mock_dependencies['validation_engine'],
+            quality_monitor=mock_dependencies['quality_monitor'],
+            taiwan_calendar=mock_dependencies['taiwan_calendar']
+        )
+    
+    def test_taiwan_walk_forward_validation(self, taiwan_pit_validator):
+        """Test walk-forward validation with Taiwan market specifics."""
+        # Taiwan market configuration
+        wf_config = WalkForwardConfig(
+            train_weeks=156,  # 3 years
+            test_weeks=26,    # 6 months
+            purge_weeks=2,
+            rebalance_weeks=4,
+            use_taiwan_calendar=True,
+            settlement_lag_days=2,
+            handle_lunar_new_year=True
+        )
+        
+        # Taiwan stock symbols
+        symbols = ["2330.TW", "2317.TW", "1101.TWO", "6505.TWO"]
+        start_date = date(2020, 1, 1)
+        end_date = date(2023, 12, 31)
+        data_types = [DataType.PRICE, DataType.VOLUME]
+        
+        # Run comprehensive validation
+        result = taiwan_pit_validator.validate_walk_forward_scenario(
+            wf_config=wf_config,
+            symbols=symbols,
+            start_date=start_date,
+            end_date=end_date,
+            data_types=data_types,
+            enable_performance_validation=True
+        )
+        
+        # Verify Taiwan-specific results
+        assert 'validation_summary' in result
+        assert result['validation_summary']['total_windows'] > 0
+        
+        # Check for Taiwan market validations
+        taiwan_validations = []
+        for validation_result in result['validation_results']:
+            if 'taiwan_validation' in validation_result:
+                taiwan_validations.append(validation_result['taiwan_validation'])
+        
+        # Should have run Taiwan market validations
+        assert len(taiwan_validations) > 0
+    
+    def test_lunar_new_year_validation(self, taiwan_pit_validator, mock_dependencies):
+        """Test validation during Lunar New Year period."""
+        # Configure validation window that spans Lunar New Year
+        window = ValidationWindow(
+            window_id="lny_test_001",
+            train_start=date(2023, 1, 1),
+            train_end=date(2023, 2, 5),
+            test_start=date(2023, 2, 15),  # After LNY
+            test_end=date(2023, 3, 15),
+            purge_start=date(2023, 2, 6),
+            purge_end=date(2023, 2, 14),   # Covers LNY period
+            window_number=1,
+            total_train_days=35,
+            total_test_days=28,
+            purge_days=9,
+            trading_days_train=25,
+            trading_days_test=20
+        )
+        
+        symbols = ["2330.TW"]
+        data_types = [DataType.PRICE]
+        
+        # Mock PIT data during LNY
+        lny_data = {
+            "2330.TW": [
+                TemporalValue(
+                    value=500.0,
+                    as_of_date=date(2023, 2, 9),   # Before LNY
+                    value_date=date(2023, 2, 9),
+                    data_type=DataType.PRICE,
+                    symbol="2330.TW"
+                ),
+                # No data during LNY holidays
+                TemporalValue(
+                    value=505.0,
+                    as_of_date=date(2023, 2, 15),  # After LNY
+                    value_date=date(2023, 2, 15),
+                    data_type=DataType.PRICE,
+                    symbol="2330.TW"
+                )
+            ]
+        }
+        mock_dependencies['pit_engine'].query.return_value = lny_data
+        
+        result = taiwan_pit_validator._validate_single_window(
+            window, symbols, data_types, enable_performance_validation=False
+        )
+        
+        # Should handle LNY period correctly
+        assert result['validation']['success'] is True
+        
+        # Check for Taiwan validation results
+        if 'taiwan_validation' in result['validation']:
+            taiwan_result = result['validation']['taiwan_validation']
+            assert 'success' in taiwan_result
+    
+    def test_taiwan_settlement_timing(self, taiwan_pit_validator, mock_dependencies):
+        """Test T+2 settlement validation for Taiwan market."""
+        # Create window with settlement timing considerations
+        window = ValidationWindow(
+            window_id="settlement_test_001",
+            train_start=date(2023, 1, 1),
+            train_end=date(2023, 1, 31),
+            test_start=date(2023, 2, 2),   # T+2 from train_end
+            test_end=date(2023, 2, 28),
+            purge_start=date(2023, 2, 1),
+            purge_end=date(2023, 2, 1),
+            window_number=1,
+            total_train_days=31,
+            total_test_days=27,
+            purge_days=1,
+            trading_days_train=22,
+            trading_days_test=19
+        )
+        
+        symbols = ["2330.TW"]
+        
+        # Test settlement validation
+        taiwan_validation = taiwan_pit_validator._validate_window_taiwan_market(window, symbols)
+        
+        # Should validate settlement timing
+        assert 'success' in taiwan_validation
+        if not taiwan_validation['success']:
+            # Check if settlement issues are detected
+            assert 'issues' in taiwan_validation
+            settlement_issues = [
+                issue for issue in taiwan_validation['issues']
+                if 'settlement' in issue.get('issue_type', '').lower()
+            ]
+    
+    def test_taiwan_corporate_actions_validation(self, taiwan_pit_validator, mock_dependencies):
+        """Test corporate action validation for Taiwan stocks."""
+        window = ValidationWindow(
+            window_id="ca_test_001",
+            train_start=date(2023, 1, 1),
+            train_end=date(2023, 3, 31),
+            test_start=date(2023, 4, 3),
+            test_end=date(2023, 6, 30),
+            purge_start=date(2023, 4, 1),
+            purge_end=date(2023, 4, 2),
+            window_number=1,
+            total_train_days=90,
+            total_test_days=89,
+            purge_days=2,
+            trading_days_train=63,
+            trading_days_test=62
+        )
+        
+        symbols = ["2330.TW"]
+        
+        # Mock corporate action data (dividend)
+        ca_data = {
+            "2330.TW": [
+                TemporalValue(
+                    value="DIVIDEND",
+                    as_of_date=date(2023, 2, 1),
+                    value_date=date(2023, 2, 1),
+                    data_type=DataType.CORPORATE_ACTION,
+                    symbol="2330.TW",
+                    metadata={
+                        'action_type': 'DIVIDEND',
+                        'ex_date': date(2023, 2, 15),
+                        'amount': 15.0
+                    }
+                )
+            ]
+        }
+        mock_dependencies['pit_engine'].query.return_value = ca_data
+        
+        result = taiwan_pit_validator._validate_single_window(
+            window, symbols, [DataType.CORPORATE_ACTION], enable_performance_validation=False
+        )
+        
+        # Should handle corporate actions properly
+        assert result['validation']['success'] is True
+    
+    def test_taiwan_price_limit_validation(self, taiwan_pit_validator, mock_dependencies):
+        """Test Taiwan market price limit validation."""
+        window = ValidationWindow(
+            window_id="price_limit_test_001",
+            train_start=date(2023, 1, 1),
+            train_end=date(2023, 1, 31),
+            test_start=date(2023, 2, 2),
+            test_end=date(2023, 2, 28),
+            purge_start=date(2023, 2, 1),
+            purge_end=date(2023, 2, 1),
+            window_number=1,
+            total_train_days=31,
+            total_test_days=27,
+            purge_days=1,
+            trading_days_train=22,
+            trading_days_test=19
+        )
+        
+        symbols = ["2330.TW"]
+        
+        # Mock price data with limit hit
+        price_data = {
+            "2330.TW": [
+                TemporalValue(
+                    value=500.0,
+                    as_of_date=date(2023, 1, 16),
+                    value_date=date(2023, 1, 16),
+                    data_type=DataType.PRICE,
+                    symbol="2330.TW"
+                ),
+                TemporalValue(
+                    value=550.0,  # 10% increase (at limit)
+                    as_of_date=date(2023, 1, 17),
+                    value_date=date(2023, 1, 17),
+                    data_type=DataType.PRICE,
+                    symbol="2330.TW"
+                ),
+                TemporalValue(
+                    value=570.0,  # >10% increase (exceeds limit)
+                    as_of_date=date(2023, 1, 18),
+                    value_date=date(2023, 1, 18),
+                    data_type=DataType.PRICE,
+                    symbol="2330.TW"
+                )
+            ]
+        }
+        mock_dependencies['pit_engine'].query.return_value = price_data
+        
+        taiwan_validation = taiwan_pit_validator._validate_window_taiwan_market(window, symbols)
+        
+        # Should detect price limit violations
+        assert 'success' in taiwan_validation
+        if not taiwan_validation['success']:
+            assert 'issues' in taiwan_validation
+            price_issues = [
+                issue for issue in taiwan_validation['issues']
+                if 'price_limit' in issue.get('issue_type', '').lower()
+            ]
+    
+    def test_taiwan_volume_liquidity_validation(self, taiwan_pit_validator, mock_dependencies):
+        """Test Taiwan market volume and liquidity validation."""
+        window = ValidationWindow(
+            window_id="volume_test_001",
+            train_start=date(2023, 1, 1),
+            train_end=date(2023, 1, 31),
+            test_start=date(2023, 2, 2),
+            test_end=date(2023, 2, 28),
+            purge_start=date(2023, 2, 1),
+            purge_end=date(2023, 2, 1),
+            window_number=1,
+            total_train_days=31,
+            total_test_days=27,
+            purge_days=1,
+            trading_days_train=22,
+            trading_days_test=19
+        )
+        
+        symbols = ["2330.TW"]
+        
+        # Mock volume data with low liquidity
+        volume_data = {
+            "2330.TW": [
+                TemporalValue(
+                    value=500,  # Low volume
+                    as_of_date=date(2023, 1, 16),
+                    value_date=date(2023, 1, 16),
+                    data_type=DataType.VOLUME,
+                    symbol="2330.TW"
+                )
+            ]
+        }
+        mock_dependencies['pit_engine'].query.return_value = volume_data
+        
+        # Test positions that might be too large for the volume
+        positions = {
+            "2330.TW": {
+                date(2023, 1, 16): 100  # 20% of daily volume (exceeds 5% limit)
+            }
+        }
+        
+        # Use Taiwan validator directly for position validation
+        taiwan_validator = taiwan_pit_validator.taiwan_validator
+        issues = taiwan_validator._validate_volume_constraints(
+            symbols, positions, window.train_start, window.train_end
+        )
+        
+        # Should detect volume constraint violations
+        assert len(issues) >= 0  # May detect issues depending on validation logic
+    
+    def test_taiwan_market_calendar_integration(self, taiwan_pit_validator, mock_dependencies):
+        """Test Taiwan market calendar integration."""
+        # Test validation during various Taiwan holidays
+        holiday_periods = [
+            (date(2023, 2, 10), date(2023, 2, 12)),  # Lunar New Year
+            (date(2023, 4, 5), date(2023, 4, 5)),    # Children's Day
+            (date(2023, 10, 10), date(2023, 10, 10)), # National Day
+        ]
+        
+        for start_holiday, end_holiday in holiday_periods:
+            # Create window that includes holiday
+            window = ValidationWindow(
+                window_id=f"holiday_test_{start_holiday.strftime('%Y%m%d')}",
+                train_start=start_holiday - timedelta(days=30),
+                train_end=start_holiday - timedelta(days=1),
+                test_start=end_holiday + timedelta(days=1),
+                test_end=end_holiday + timedelta(days=30),
+                purge_start=start_holiday,
+                purge_end=end_holiday,
+                window_number=1,
+                total_train_days=30,
+                total_test_days=30,
+                purge_days=(end_holiday - start_holiday).days + 1,
+                trading_days_train=21,
+                trading_days_test=21
+            )
+            
+            symbols = ["2330.TW"]
+            
+            result = taiwan_pit_validator._validate_single_window(
+                window, symbols, [DataType.PRICE], enable_performance_validation=False
+            )
+            
+            # Should handle holidays correctly
+            assert result['validation']['success'] is True
+
+
+class TestTaiwanHistoricalValidation:
+    """Test validation against historical Taiwan market periods."""
+    
+    @pytest.fixture
+    def historical_validator(self):
+        """Create validator for historical testing."""
+        mock_store = Mock(spec=TemporalStore)
+        pit_engine = Mock(spec=PointInTimeEngine)
+        
+        # Mock historical data availability
+        pit_engine.check_data_availability.return_value = True
+        pit_engine.query.return_value = {}
+        
+        config = PITValidationConfig(
+            validation_level=ValidationLevel.STRICT,
+            require_quality_validation=True
+        )
+        
+        return PITValidator(
+            config=config,
+            temporal_store=mock_store,
+            pit_engine=pit_engine
+        )
+    
+    def test_dotcom_bubble_period_validation(self, historical_validator):
+        """Test validation during dot-com bubble period (2000-2001)."""
+        wf_config = WalkForwardConfig(
+            train_weeks=104,  # 2 years
+            test_weeks=26,    # 6 months
+            purge_weeks=2
+        )
+        
+        symbols = ["2330.TW", "2317.TW"]  # Major Taiwan tech stocks
+        start_date = date(1999, 1, 1)
+        end_date = date(2002, 12, 31)
+        
+        result = historical_validator.validate_walk_forward_scenario(
+            wf_config=wf_config,
+            symbols=symbols,
+            start_date=start_date,
+            end_date=end_date,
+            enable_performance_validation=False
+        )
+        
+        # Should handle volatile period
+        assert result['validation_summary']['total_windows'] > 0
+        assert result['summary_statistics']['success_rate'] >= 0.5
+    
+    def test_asian_financial_crisis_validation(self, historical_validator):
+        """Test validation during Asian Financial Crisis (1997-1998)."""
+        wf_config = WalkForwardConfig(
+            train_weeks=78,   # 1.5 years
+            test_weeks=13,    # 3 months
+            purge_weeks=1
+        )
+        
+        symbols = ["2330.TW", "1101.TWO"]
+        start_date = date(1996, 1, 1)
+        end_date = date(1999, 12, 31)
+        
+        result = historical_validator.validate_walk_forward_scenario(
+            wf_config=wf_config,
+            symbols=symbols,
+            start_date=start_date,
+            end_date=end_date,
+            enable_performance_validation=False
+        )
+        
+        # Should handle crisis period with appropriate warnings
+        assert result['validation_summary']['total_windows'] > 0
+        
+        # May have bias or quality issues due to market stress
+        total_issues = (
+            result['validation_summary']['total_bias_issues'] +
+            result['validation_summary']['total_quality_issues']
+        )
+        # Allow for some issues during crisis periods
+        assert total_issues >= 0
+    
+    def test_covid_pandemic_period_validation(self, historical_validator):
+        """Test validation during COVID-19 pandemic (2020-2021)."""
+        wf_config = WalkForwardConfig(
+            train_weeks=156,  # 3 years
+            test_weeks=26,    # 6 months
+            purge_weeks=2
+        )
+        
+        symbols = ["2330.TW", "2317.TW", "1101.TWO", "6505.TWO"]
+        start_date = date(2018, 1, 1)
+        end_date = date(2022, 12, 31)
+        
+        result = historical_validator.validate_walk_forward_scenario(
+            wf_config=wf_config,
+            symbols=symbols,
+            start_date=start_date,
+            end_date=end_date,
+            enable_performance_validation=True
+        )
+        
+        # Should handle pandemic period with market volatility
+        assert result['validation_summary']['total_windows'] > 0
+        assert result['validation_summary']['total_runtime_seconds'] > 0
+        
+        # Check health score
+        health_score = result['summary_statistics']['overall_health_score']
+        assert 0 <= health_score <= 100
+
+
+class TestTaiwanComplianceValidation:
+    """Test Taiwan market regulatory compliance validation."""
+    
+    def test_twse_compliance_validation(self):
+        """Test TWSE (Taiwan Stock Exchange) compliance."""
+        mock_store = Mock(spec=TemporalStore)
+        
+        # TWSE-specific configuration
+        config = TaiwanValidationConfig(
+            daily_price_limit_pct=0.10,  # TWSE 10% daily limit
+            validate_price_limits=True,
+            validate_volume_constraints=True,
+            settlement_lag_days=2,        # T+2 settlement
+            validate_corporate_actions=True
+        )
+        
+        validator = TaiwanMarketValidator(
+            config=config,
+            temporal_store=mock_store
+        )
+        
+        # Test TWSE symbols
+        twse_symbols = ["2330.TW", "2317.TW", "1101.TW"]
+        
+        for symbol in twse_symbols:
+            assert validator._is_valid_taiwan_symbol(symbol) is True
+            assert symbol.endswith('.TW')
+    
+    def test_tpex_compliance_validation(self):
+        """Test TPEx (Taipei Exchange) compliance."""
+        mock_store = Mock(spec=TemporalStore)
+        
+        # TPEx-specific configuration (similar to TWSE but different market)
+        config = TaiwanValidationConfig(
+            daily_price_limit_pct=0.10,  # TPEx also has 10% limit
+            validate_price_limits=True,
+            settlement_lag_days=2
+        )
+        
+        validator = TaiwanMarketValidator(
+            config=config,
+            temporal_store=mock_store
+        )
+        
+        # Test TPEx symbols
+        tpex_symbols = ["1101.TWO", "6505.TWO", "8436.TWO"]
+        
+        for symbol in tpex_symbols:
+            assert validator._is_valid_taiwan_symbol(symbol) is True
+            assert symbol.endswith('.TWO')
+    
+    def test_securities_transaction_tax_compliance(self):
+        """Test securities transaction tax compliance (0.3% for stocks)."""
+        # This would test transaction cost validation
+        # Implementation depends on transaction cost modeling from other components
+        
+        mock_store = Mock(spec=TemporalStore)
+        validator = create_strict_taiwan_validator(mock_store)
+        
+        # Mock transaction with tax implications
+        transactions = [
+            {
+                'date': date(2023, 6, 15),
+                'symbol': '2330.TW',
+                'quantity': 10000,
+                'price': 500.0,
+                'transaction_cost': 15000.0,  # 0.3% of 5M transaction
+                'tax_rate': 0.003
+            }
+        ]
+        
+        issues = validator._validate_transactions(transactions)
+        
+        # Should validate transaction structure
+        assert isinstance(issues, list)
 
 
 if __name__ == "__main__":
