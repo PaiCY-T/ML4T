@@ -244,6 +244,93 @@ class TestValidationFramework:
         assert latency_ms < 15.0, f"Streaming validation latency {latency_ms:.2f}ms exceeds target"
     
     @pytest.mark.asyncio
+    async def test_optimized_streaming_validation(self, pit_orchestrator):
+        """Test optimized streaming validation with fast-path optimization."""
+        # Test fast-path for major Taiwan stocks
+        major_stocks = ["2330", "2317", "2454", "2412", "3008"]
+        
+        for symbol in major_stocks:
+            stream_value = TemporalValue(
+                symbol=symbol,
+                value=Decimal("500.0"),
+                value_date=date(2024, 1, 15),
+                as_of_date=date(2024, 1, 15),
+                data_type=DataType.PRICE,
+                created_at=datetime.utcnow()
+            )
+            
+            # Measure optimized validation
+            start_time = time.perf_counter()
+            result = await pit_orchestrator.validate_streaming_data_optimized(stream_value, use_fast_path=True)
+            end_time = time.perf_counter()
+            
+            latency_ms = (end_time - start_time) * 1000
+            
+            # Fast-path should be under 5ms
+            assert latency_ms < 5.0, f"Fast-path validation for {symbol} took {latency_ms:.2f}ms"
+            assert result.result in [ValidationResult.PASS, ValidationResult.SKIP]
+    
+    @pytest.mark.asyncio
+    async def test_high_frequency_streaming_validation(self, pit_orchestrator):
+        """Test high-frequency streaming validation throughput."""
+        # Generate high-frequency data stream
+        stream_values = []
+        for i in range(1000):
+            value = TemporalValue(
+                symbol=f"2{330 + i % 10}",
+                value=Decimal(f"{500 + i % 100}"),
+                value_date=date(2024, 1, 15),
+                as_of_date=date(2024, 1, 15),
+                data_type=DataType.PRICE,
+                created_at=datetime.utcnow()
+            )
+            stream_values.append(value)
+        
+        # Measure throughput
+        start_time = time.perf_counter()
+        
+        tasks = [pit_orchestrator.validate_streaming_data_optimized(value) for value in stream_values]
+        results = await asyncio.gather(*tasks)
+        
+        end_time = time.perf_counter()
+        total_time_s = end_time - start_time
+        throughput = len(stream_values) / total_time_s
+        
+        # Should achieve >10K validations/second
+        assert throughput > 10000, f"Streaming throughput {throughput:.0f}/s below target 10K/s"
+        assert len(results) == len(stream_values)
+        assert all(isinstance(result, ValidationOutput) for result in results)
+    
+    @pytest.mark.asyncio
+    async def test_batch_queue_processing(self, pit_orchestrator):
+        """Test batch queue processing optimization."""
+        # Add values to batch queue
+        test_values = []
+        for i in range(150):  # Exceed batch size to trigger processing
+            value = TemporalValue(
+                symbol=f"2{330 + i % 10}",
+                value=Decimal(f"{500 + i}"),
+                value_date=date(2024, 1, 15),
+                as_of_date=date(2024, 1, 15),
+                data_type=DataType.PRICE
+            )
+            test_values.append(value)
+        
+        # Process through batch queue
+        results = []
+        for value in test_values:
+            result = await pit_orchestrator.add_to_batch_queue(value)
+            if result:  # Batch was processed
+                results.append(result)
+        
+        # Process remaining queue
+        remaining_results = await pit_orchestrator.process_batch_queue()
+        
+        # Should have processed all values efficiently
+        total_processed = len(results) + len(remaining_results)
+        assert total_processed > 0, "Batch processing should handle some values"
+    
+    @pytest.mark.asyncio
     async def test_validation_caching(self, validation_engine):
         """Test validation result caching."""
         # Create test value

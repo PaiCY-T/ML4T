@@ -581,6 +581,267 @@ class TestPerformanceUnderStress:
         
         print(f"Stress test: {len(validation_tasks)} validations in {total_time_ms:.2f}ms "
               f"({validations_per_second:.0f} validations/second)")
+    
+    @pytest.mark.asyncio
+    async def test_ultra_high_throughput_validation(self):
+        """Test validators at ultra-high throughput (>10K validations/second)."""
+        validators = [
+            TaiwanPriceLimitValidator(),
+            TaiwanVolumeValidator()
+        ]
+        
+        # Create larger test dataset
+        test_values = []
+        taiwan_symbols = ["2330", "2317", "2454", "2412", "3008", "2882", "1303", "2002"]
+        
+        for i in range(5000):
+            symbol = taiwan_symbols[i % len(taiwan_symbols)]
+            value = TemporalValue(
+                symbol=symbol,
+                value=Decimal(f"{400 + (i % 300)}"),  # Prices 400-700
+                value_date=date(2024, 1, 15),
+                as_of_date=date(2024, 1, 15),
+                data_type=DataType.PRICE,
+                created_at=datetime.utcnow()
+            )
+            test_values.append(value)
+        
+        # Batch processing for optimal performance
+        import time
+        start_time = time.perf_counter()
+        
+        batch_size = 100
+        total_validations = 0
+        
+        for i in range(0, len(test_values), batch_size):
+            batch = test_values[i:i + batch_size]
+            validation_tasks = []
+            
+            for value in batch:
+                context = ValidationContext(
+                    symbol=value.symbol,
+                    data_date=value.value_date,
+                    as_of_date=value.as_of_date,
+                    data_type=value.data_type
+                )
+                
+                for validator in validators:
+                    if validator.can_validate(value, context):
+                        validation_tasks.append(validator.validate(value, context))
+            
+            await asyncio.gather(*validation_tasks)
+            total_validations += len(validation_tasks)
+        
+        end_time = time.perf_counter()
+        
+        # Calculate throughput
+        total_time_s = end_time - start_time
+        validations_per_second = total_validations / total_time_s
+        
+        # Target: >10K validations/second
+        assert validations_per_second > 10000, f"Ultra-high throughput {validations_per_second:.0f}/s below 10K target"
+        
+        print(f"Ultra-high throughput test: {total_validations} validations in {total_time_s:.2f}s "
+              f"({validations_per_second:.0f} validations/second)")
+
+
+class TestRealWorldTaiwanScenarios:
+    """Test validators against real-world Taiwan market scenarios."""
+    
+    @pytest.mark.asyncio
+    async def test_taiwan_semiconductor_earnings_season(self, fundamental_validator):
+        """Test validation during Taiwan semiconductor earnings season."""
+        # Simulate TSMC, MediaTek, ASE Group earnings
+        earnings_scenarios = [
+            {
+                "symbol": "2330",  # TSMC
+                "revenue": 75900000000,  # Q4 2023 actual
+                "net_income": 25960000000,
+                "quarter_end": date(2023, 12, 31),
+                "report_date": date(2024, 1, 18),  # Typical TSMC timing
+                "expected_result": ValidationResult.PASS
+            },
+            {
+                "symbol": "2454",  # MediaTek  
+                "revenue": 18900000000,  # Q4 2023 estimate
+                "net_income": 1200000000,
+                "quarter_end": date(2023, 12, 31),
+                "report_date": date(2024, 1, 30),  # MediaTek later timing
+                "expected_result": ValidationResult.PASS
+            },
+            {
+                "symbol": "3711",  # ASE Group
+                "revenue": 156000000000,  # Q4 2023 estimate
+                "net_income": 8500000000,
+                "quarter_end": date(2023, 12, 31),
+                "report_date": date(2024, 2, 2),  # Even later
+                "expected_result": ValidationResult.PASS
+            }
+        ]
+        
+        for scenario in earnings_scenarios:
+            earnings_data = TemporalValue(
+                symbol=scenario["symbol"],
+                value={
+                    "fiscal_year": 2023,
+                    "fiscal_quarter": 4,
+                    "revenue": scenario["revenue"],
+                    "net_income": scenario["net_income"],
+                    "report_type": "quarterly"
+                },
+                value_date=scenario["quarter_end"],
+                as_of_date=scenario["report_date"],
+                data_type=DataType.FUNDAMENTAL
+            )
+            
+            context = ValidationContext(
+                symbol=scenario["symbol"],
+                data_date=scenario["quarter_end"],
+                as_of_date=scenario["report_date"],
+                data_type=DataType.FUNDAMENTAL
+            )
+            
+            result = await fundamental_validator.validate(earnings_data, context)
+            
+            # Check timing is appropriate for Taiwan market
+            days_lag = (scenario["report_date"] - scenario["quarter_end"]).days
+            assert 15 <= days_lag <= 90, f"Unrealistic reporting lag: {days_lag} days"
+            
+            assert result.result == scenario["expected_result"], f"Unexpected result for {scenario['symbol']}"
+    
+    @pytest.mark.asyncio
+    async def test_taiwan_etf_extreme_volume(self, volume_validator):
+        """Test volume validation for Taiwan ETF extreme trading."""
+        # Simulate 0050 (Taiwan 50 ETF) during rebalancing
+        etf_rebalancing_volume = TemporalValue(
+            symbol="0050",
+            value=150000000,  # 150M shares (extreme for ETF)
+            value_date=date(2024, 3, 15),  # Quarterly rebalancing
+            as_of_date=date(2024, 3, 15),
+            data_type=DataType.VOLUME
+        )
+        
+        # Normal ETF volumes
+        normal_etf_volumes = [
+            TemporalValue(
+                symbol="0050",
+                value=5000000 + i * 500000,  # 5-15M normal range
+                value_date=date(2024, 3, 15) - timedelta(days=i+1),
+                as_of_date=date(2024, 3, 15) - timedelta(days=i+1),
+                data_type=DataType.VOLUME
+            )
+            for i in range(20)
+        ]
+        
+        context = ValidationContext(
+            symbol="0050",
+            data_date=date(2024, 3, 15),
+            as_of_date=date(2024, 3, 15),
+            data_type=DataType.VOLUME,
+            historical_data=normal_etf_volumes,
+            metadata={"security_type": "ETF", "event": "quarterly_rebalancing"}
+        )
+        
+        result = await volume_validator.validate(etf_rebalancing_volume, context)
+        
+        # Should detect volume spike but recognize ETF context
+        assert result.result == ValidationResult.WARNING
+        assert any("Volume spike" in issue.description for issue in result.issues)
+        
+        # Should have very high spike ratio
+        volume_issue = next(
+            issue for issue in result.issues if "Volume spike" in issue.description
+        )
+        assert volume_issue.details["ratio"] > 10.0
+    
+    @pytest.mark.asyncio
+    async def test_taiwan_warrant_pricing_validation(self, price_validator):
+        """Test price validation for Taiwan warrants with high volatility."""
+        # Taiwan warrants can have extreme price movements
+        warrant_scenarios = [
+            {
+                "symbol": "03008P",  # Put warrant example
+                "prev_price": Decimal("0.50"),
+                "current_price": Decimal("2.50"),  # 400% increase
+                "expected_result": ValidationResult.WARNING  # Extreme but possible
+            },
+            {
+                "symbol": "03009C",  # Call warrant example  
+                "prev_price": Decimal("1.20"),
+                "current_price": Decimal("0.05"),  # 95% drop
+                "expected_result": ValidationResult.WARNING  # Extreme but possible
+            }
+        ]
+        
+        for scenario in warrant_scenarios:
+            warrant_price = TemporalValue(
+                symbol=scenario["symbol"],
+                value=scenario["current_price"],
+                value_date=date(2024, 1, 15),
+                as_of_date=date(2024, 1, 15),
+                data_type=DataType.PRICE
+            )
+            
+            context = ValidationContext(
+                symbol=scenario["symbol"],
+                data_date=date(2024, 1, 15),
+                as_of_date=date(2024, 1, 15),
+                data_type=DataType.PRICE,
+                historical_data=[
+                    TemporalValue(
+                        symbol=scenario["symbol"],
+                        value=scenario["prev_price"],
+                        value_date=date(2024, 1, 14),
+                        as_of_date=date(2024, 1, 14),
+                        data_type=DataType.PRICE
+                    )
+                ],
+                metadata={"security_type": "WARRANT"}
+            )
+            
+            result = await price_validator.validate(warrant_price, context)
+            
+            # Warrants should trigger warnings for extreme moves but not errors
+            assert result.result == scenario["expected_result"]
+            if result.issues:
+                # Should detect extreme price movement
+                assert any("price" in issue.description.lower() for issue in result.issues)
+    
+    @pytest.mark.asyncio
+    async def test_taiwan_foreign_investment_limit_scenario(self, volume_validator):
+        """Test validation during foreign investment limit scenarios."""
+        # Simulate volume spike when foreign investment limit is reached
+        foreign_limit_volume = TemporalValue(
+            symbol="2330",  # TSMC often hits foreign limits
+            value=300000000,  # 300M shares
+            value_date=date(2024, 1, 15),
+            as_of_date=date(2024, 1, 15),
+            data_type=DataType.VOLUME
+        )
+        
+        # Context with foreign investment metadata
+        context = ValidationContext(
+            symbol="2330",
+            data_date=date(2024, 1, 15),
+            as_of_date=date(2024, 1, 15),
+            data_type=DataType.VOLUME,
+            metadata={
+                "foreign_investment_limit": 0.50,  # 50% limit
+                "current_foreign_ownership": 0.49,  # Close to limit
+                "market_event": "foreign_limit_approach"
+            }
+        )
+        
+        result = await volume_validator.validate(foreign_limit_volume, context)
+        
+        # Should detect volume spike related to foreign investment activity
+        assert result.result == ValidationResult.WARNING
+        if result.issues:
+            volume_issue = next(
+                (issue for issue in result.issues if "Volume" in issue.description),
+                None
+            )
+            assert volume_issue is not None
 
 
 if __name__ == "__main__":

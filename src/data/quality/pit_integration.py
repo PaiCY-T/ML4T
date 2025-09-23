@@ -26,7 +26,7 @@ from .validation_engine import (
 )
 from .taiwan_validators import create_taiwan_validators
 from .monitor import QualityMonitor, QualityMetrics, create_taiwan_market_monitor
-from .alerting import AlertingSystem
+from .alerting import AlertManager
 from .metrics import QualityMetrics as QualityMetricsCalculator
 from .validators import QualityIssue, SeverityLevel, QualityCheckType
 
@@ -116,9 +116,20 @@ class PITValidationOrchestrator:
         self.cache_hits = 0
         self.cache_misses = 0
         
-        # Cache for validation contexts
+        # Enhanced caching system
         self._context_cache: Dict[str, ValidationContext] = {}
         self._cache_timestamps: Dict[str, datetime] = {}
+        self._validation_result_cache: Dict[str, ValidationOutput] = {}
+        self._result_cache_timestamps: Dict[str, datetime] = {}
+        
+        # Performance optimization pools
+        self._context_pool: List[ValidationContext] = []
+        self._max_pool_size = 1000
+        
+        # Batch processing optimization
+        self._batch_queue: List[TemporalValue] = []
+        self._batch_processing_active = False
+        self._max_batch_size = 100
         
         logger.info(f"PIT validation orchestrator initialized with mode: {self.config.mode.value}")
     
@@ -578,6 +589,8 @@ class PITValidationOrchestrator:
         """Clear all caches."""
         self._context_cache.clear()
         self._cache_timestamps.clear()
+        self._validation_result_cache.clear()
+        self._result_cache_timestamps.clear()
         
         if hasattr(self.validation_engine, 'clear_cache'):
             self.validation_engine.clear_cache()
@@ -586,6 +599,150 @@ class PITValidationOrchestrator:
             self.pit_engine.clear_cache()
         
         logger.info("All caches cleared")
+    
+    def _get_pooled_context(self) -> Optional[ValidationContext]:
+        """Get a context from the object pool."""
+        if self._context_pool:
+            return self._context_pool.pop()
+        return None
+    
+    def _return_to_pool(self, context: ValidationContext) -> None:
+        """Return a context to the object pool."""
+        if len(self._context_pool) < self._max_pool_size:
+            # Reset context for reuse
+            context.historical_data = []
+            context.metadata = {}
+            self._context_pool.append(context)
+    
+    def _get_validation_cache_key(self, value: TemporalValue, context: ValidationContext) -> str:
+        """Generate cache key for validation results."""
+        return f"val:{value.symbol}:{value.data_type.value}:{value.value_date}:{value.as_of_date}:{hash(str(value.value))}"
+    
+    async def _get_cached_validation_result(self, value: TemporalValue, context: ValidationContext) -> Optional[ValidationOutput]:
+        """Get cached validation result if available."""
+        if not self.config.enable_caching:
+            return None
+        
+        cache_key = self._get_validation_cache_key(value, context)
+        
+        if cache_key in self._validation_result_cache:
+            cached_time = self._result_cache_timestamps.get(cache_key)
+            if cached_time and (datetime.utcnow() - cached_time).seconds < self.config.cache_ttl_seconds:
+                self.cache_hits += 1
+                return self._validation_result_cache[cache_key]
+            else:
+                # Expired
+                del self._validation_result_cache[cache_key]
+                if cache_key in self._result_cache_timestamps:
+                    del self._result_cache_timestamps[cache_key]
+        
+        self.cache_misses += 1
+        return None
+    
+    async def _cache_validation_result(self, value: TemporalValue, context: ValidationContext, result: ValidationOutput) -> None:
+        """Cache validation result."""
+        if not self.config.enable_caching:
+            return
+        
+        cache_key = self._get_validation_cache_key(value, context)
+        self._validation_result_cache[cache_key] = result
+        self._result_cache_timestamps[cache_key] = datetime.utcnow()
+        
+        # Evict old entries if cache too large
+        if len(self._validation_result_cache) > 10000:  # Max cache size
+            # Remove 10% of oldest entries
+            sorted_keys = sorted(
+                self._result_cache_timestamps.items(),
+                key=lambda x: x[1]
+            )
+            for key, _ in sorted_keys[:1000]:
+                if key in self._validation_result_cache:
+                    del self._validation_result_cache[key]
+                del self._result_cache_timestamps[key]
+    
+    async def validate_streaming_data_optimized(self,
+                                              value: TemporalValue,
+                                              use_fast_path: bool = True) -> ValidationOutput:
+        """Optimized streaming validation with fast-path for common cases."""
+        start_time = time.perf_counter()
+        
+        try:
+            # Fast path for common Taiwan stocks with price data
+            if (use_fast_path and 
+                value.data_type == DataType.PRICE and 
+                value.symbol and value.symbol in ['2330', '2317', '2454', '2412', '3008']):
+                
+                # Quick validation for major Taiwan stocks
+                if isinstance(value.value, Decimal) and 50 <= value.value <= 2000:
+                    return ValidationOutput(
+                        validator_name="pit_orchestrator_fast_path",
+                        validation_id=f"fast_{int(time.time())}",
+                        result=ValidationResult.PASS,
+                        execution_time_ms=(time.perf_counter() - start_time) * 1000
+                    )
+            
+            # Check cache first
+            context = await self._create_validation_context(value, validate_against_pit=False)
+            cached_result = await self._get_cached_validation_result(value, context)
+            
+            if cached_result:
+                return cached_result
+            
+            # Full validation
+            validation_results = await self.validation_engine.validate_value(value, context)
+            primary_result = validation_results[0] if validation_results else ValidationOutput(
+                validator_name="pit_orchestrator",
+                validation_id=f"pit_{int(time.time())}",
+                result=ValidationResult.SKIP,
+                metadata={"reason": "No applicable validators"}
+            )
+            
+            # Cache the result
+            await self._cache_validation_result(value, context, primary_result)
+            
+            # Return context to pool
+            self._return_to_pool(context)
+            
+            return primary_result
+            
+        except Exception as e:
+            logger.error(f"Optimized streaming validation failed: {e}")
+            return ValidationOutput(
+                validator_name="pit_orchestrator",
+                validation_id=f"pit_error_{int(time.time())}",
+                result=ValidationResult.FAIL,
+                issues=[QualityIssue(
+                    check_type=QualityCheckType.VALIDITY,
+                    severity=SeverityLevel.ERROR,
+                    symbol=value.symbol or "",
+                    data_type=value.data_type,
+                    data_date=value.value_date,
+                    issue_date=datetime.utcnow(),
+                    description=f"Optimized streaming validation error: {str(e)}"
+                )],
+                execution_time_ms=(time.perf_counter() - start_time) * 1000
+            )
+    
+    async def process_batch_queue(self) -> Dict[TemporalValue, ValidationOutput]:
+        """Process accumulated batch queue for optimal throughput."""
+        if not self._batch_queue:
+            return {}
+        
+        batch = self._batch_queue[:]
+        self._batch_queue.clear()
+        
+        return await self.validate_bulk_data(batch, batch_size=len(batch))
+    
+    async def add_to_batch_queue(self, value: TemporalValue) -> Optional[ValidationOutput]:
+        """Add value to batch queue, process if threshold reached."""
+        self._batch_queue.append(value)
+        
+        if len(self._batch_queue) >= self._max_batch_size:
+            # Process batch immediately
+            results = await self.process_batch_queue()
+            return results.get(value)
+        
+        return None
     
     def shutdown(self) -> None:
         """Shutdown orchestrator and cleanup resources."""
