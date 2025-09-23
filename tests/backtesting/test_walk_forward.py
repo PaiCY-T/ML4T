@@ -34,7 +34,7 @@ from src.backtesting.integration.pit_validator import (
 from src.data.core.temporal import TemporalStore, DataType, TemporalValue
 from src.data.models.taiwan_market import TaiwanTradingCalendar
 from src.data.pipeline.pit_engine import PointInTimeEngine, BiasCheckLevel
-from src.data.quality.validation_engine import ValidationEngine, QualityMonitor
+from src.data.quality.validation_engine import ValidationEngine
 
 
 class TestWalkForwardConfig:
