@@ -609,3 +609,497 @@ def slack_alert_callback(issue: QualityIssue):
     if issue.severity == SeverityLevel.CRITICAL:
         # Placeholder for Slack notification
         logger.info(f"Would send Slack alert for: {issue.description}")
+
+
+# Enhanced validators using the new plugin architecture
+
+from .validation_engine import ValidationPlugin, ValidationContext, ValidationOutput, ValidationResult, ValidationPriority
+
+
+class EnhancedCompletenessValidator(ValidationPlugin):
+    """Enhanced completeness validator using the plugin architecture."""
+    
+    def __init__(self, required_fields: Dict[DataType, Set[str]]):
+        self.required_fields = required_fields
+    
+    @property
+    def name(self) -> str:
+        return "enhanced_completeness_validator"
+    
+    @property
+    def version(self) -> str:
+        return "1.0.0"
+    
+    @property
+    def priority(self) -> ValidationPriority:
+        return ValidationPriority.HIGH
+    
+    @property
+    def supported_data_types(self) -> Set[DataType]:
+        return set(self.required_fields.keys())
+    
+    def can_validate(self, value: TemporalValue, context: ValidationContext) -> bool:
+        """Check if this validator can process the given value."""
+        return value.data_type in self.required_fields
+    
+    async def validate(self, value: TemporalValue, context: ValidationContext) -> ValidationOutput:
+        """Perform enhanced completeness validation."""
+        start_time = datetime.utcnow()
+        issues = []
+        
+        required = self.required_fields.get(value.data_type, set())
+        
+        if isinstance(value.value, dict):
+            missing_fields = required - set(value.value.keys())
+            
+            if missing_fields:
+                issues.append(QualityIssue(
+                    check_type=QualityCheckType.COMPLETENESS,
+                    severity=SeverityLevel.WARNING,
+                    symbol=value.symbol or "",
+                    data_type=value.data_type,
+                    data_date=value.value_date,
+                    issue_date=datetime.utcnow(),
+                    description=f"Missing required fields: {missing_fields}",
+                    details={"missing_fields": list(missing_fields)},
+                    suggested_action="Verify data source completeness"
+                ))
+            
+            # Check for null values in required fields
+            null_fields = []
+            for field in required:
+                if field in value.value and value.value[field] is None:
+                    null_fields.append(field)
+            
+            if null_fields:
+                issues.append(QualityIssue(
+                    check_type=QualityCheckType.COMPLETENESS,
+                    severity=SeverityLevel.ERROR,
+                    symbol=value.symbol or "",
+                    data_type=value.data_type,
+                    data_date=value.value_date,
+                    issue_date=datetime.utcnow(),
+                    description=f"Null values in required fields: {null_fields}",
+                    details={"null_fields": null_fields},
+                    suggested_action="Check data source for null handling"
+                ))
+        
+        elif value.value is None and required:
+            issues.append(QualityIssue(
+                check_type=QualityCheckType.COMPLETENESS,
+                severity=SeverityLevel.CRITICAL,
+                symbol=value.symbol or "",
+                data_type=value.data_type,
+                data_date=value.value_date,
+                issue_date=datetime.utcnow(),
+                description="Null value for required data",
+                suggested_action="Check data source"
+            ))
+        
+        result = ValidationResult.FAIL if any(i.severity == SeverityLevel.CRITICAL for i in issues) else ValidationResult.PASS
+        execution_time = (datetime.utcnow() - start_time).total_seconds() * 1000
+        
+        return ValidationOutput(
+            validator_name=self.name,
+            validation_id=f"{self.name}_{int(start_time.timestamp())}",
+            result=result,
+            issues=issues,
+            execution_time_ms=execution_time
+        )
+
+
+class EnhancedAccuracyValidator(ValidationPlugin):
+    """Enhanced accuracy validator with Taiwan market constraints."""
+    
+    def __init__(self):
+        # Taiwan market constraints
+        self.price_constraints = {
+            "min_price": Decimal("0.01"),
+            "max_price": Decimal("10000.00"),
+            "min_volume": 0,
+            "max_daily_change": 0.10  # 10% daily limit
+        }
+        
+        # Performance thresholds
+        self.performance_thresholds = {
+            "max_validation_time_ms": 5.0  # Target < 5ms for accuracy validation
+        }
+    
+    @property
+    def name(self) -> str:
+        return "enhanced_accuracy_validator"
+    
+    @property
+    def version(self) -> str:
+        return "1.0.0"
+    
+    @property
+    def priority(self) -> ValidationPriority:
+        return ValidationPriority.HIGH
+    
+    @property
+    def supported_data_types(self) -> Set[DataType]:
+        return {DataType.PRICE, DataType.VOLUME, DataType.MARKET_DATA}
+    
+    def can_validate(self, value: TemporalValue, context: ValidationContext) -> bool:
+        """Check if this validator can process the given value."""
+        return value.data_type in self.supported_data_types
+    
+    async def validate(self, value: TemporalValue, context: ValidationContext) -> ValidationOutput:
+        """Perform enhanced accuracy validation with Taiwan market rules."""
+        start_time = datetime.utcnow()
+        issues = []
+        
+        try:
+            if value.data_type == DataType.PRICE:
+                issues.extend(self._validate_price_accuracy(value, context))
+            elif value.data_type == DataType.VOLUME:
+                issues.extend(self._validate_volume_accuracy(value, context))
+            elif value.data_type == DataType.MARKET_DATA:
+                issues.extend(self._validate_market_data_accuracy(value, context))
+        
+        except Exception as e:
+            logger.error(f"Error in enhanced accuracy validation: {e}")
+            issues.append(QualityIssue(
+                check_type=QualityCheckType.VALIDITY,
+                severity=SeverityLevel.ERROR,
+                symbol=value.symbol or "",
+                data_type=value.data_type,
+                data_date=value.value_date,
+                issue_date=datetime.utcnow(),
+                description=f"Validation error: {str(e)}"
+            ))
+        
+        result = ValidationResult.FAIL if any(i.severity == SeverityLevel.CRITICAL for i in issues) else ValidationResult.PASS
+        execution_time = (datetime.utcnow() - start_time).total_seconds() * 1000
+        
+        # Performance check
+        if execution_time > self.performance_thresholds["max_validation_time_ms"]:
+            issues.append(QualityIssue(
+                check_type=QualityCheckType.VALIDITY,
+                severity=SeverityLevel.WARNING,
+                symbol=value.symbol or "",
+                data_type=value.data_type,
+                data_date=value.value_date,
+                issue_date=datetime.utcnow(),
+                description=f"Validation performance warning: {execution_time:.2f}ms > {self.performance_thresholds['max_validation_time_ms']}ms",
+                details={"execution_time_ms": execution_time, "threshold_ms": self.performance_thresholds["max_validation_time_ms"]}
+            ))
+        
+        return ValidationOutput(
+            validator_name=self.name,
+            validation_id=f"{self.name}_{int(start_time.timestamp())}",
+            result=result,
+            issues=issues,
+            execution_time_ms=execution_time
+        )
+    
+    def _validate_price_accuracy(self, value: TemporalValue, context: ValidationContext) -> List[QualityIssue]:
+        """Validate price accuracy."""
+        issues = []
+        
+        if isinstance(value.value, (int, float, Decimal)):
+            price = Decimal(str(value.value))
+            
+            # Check price range
+            if price < self.price_constraints["min_price"]:
+                issues.append(QualityIssue(
+                    check_type=QualityCheckType.ACCURACY,
+                    severity=SeverityLevel.ERROR,
+                    symbol=value.symbol or "",
+                    data_type=value.data_type,
+                    data_date=value.value_date,
+                    issue_date=datetime.utcnow(),
+                    description=f"Price {price} below minimum {self.price_constraints['min_price']}",
+                    details={"price": float(price), "min_allowed": float(self.price_constraints["min_price"])},
+                    suggested_action="Verify price data source"
+                ))
+            
+            elif price > self.price_constraints["max_price"]:
+                issues.append(QualityIssue(
+                    check_type=QualityCheckType.ACCURACY,
+                    severity=SeverityLevel.WARNING,
+                    symbol=value.symbol or "",
+                    data_type=value.data_type,
+                    data_date=value.value_date,
+                    issue_date=datetime.utcnow(),
+                    description=f"Price {price} unusually high",
+                    details={"price": float(price)},
+                    suggested_action="Verify for stock splits or unusual events"
+                ))
+        
+        return issues
+    
+    def _validate_volume_accuracy(self, value: TemporalValue, context: ValidationContext) -> List[QualityIssue]:
+        """Validate volume accuracy."""
+        issues = []
+        
+        if isinstance(value.value, (int, float)):
+            volume = int(value.value)
+            
+            if volume < 0:
+                issues.append(QualityIssue(
+                    check_type=QualityCheckType.ACCURACY,
+                    severity=SeverityLevel.ERROR,
+                    symbol=value.symbol or "",
+                    data_type=value.data_type,
+                    data_date=value.value_date,
+                    issue_date=datetime.utcnow(),
+                    description=f"Negative volume: {volume}",
+                    details={"volume": volume},
+                    suggested_action="Check data source for volume calculation errors"
+                ))
+        
+        return issues
+    
+    def _validate_market_data_accuracy(self, value: TemporalValue, context: ValidationContext) -> List[QualityIssue]:
+        """Validate market data accuracy."""
+        issues = []
+        
+        if isinstance(value.value, dict):
+            # Check OHLC consistency
+            ohlc_fields = ["open_price", "high_price", "low_price", "close_price"]
+            ohlc_values = {}
+            
+            for field in ohlc_fields:
+                if field in value.value and value.value[field] is not None:
+                    try:
+                        ohlc_values[field] = Decimal(str(value.value[field]))
+                    except (ValueError, TypeError):
+                        issues.append(QualityIssue(
+                            check_type=QualityCheckType.ACCURACY,
+                            severity=SeverityLevel.ERROR,
+                            symbol=value.symbol or "",
+                            data_type=value.data_type,
+                            data_date=value.value_date,
+                            issue_date=datetime.utcnow(),
+                            description=f"Invalid {field} value: {value.value[field]}",
+                            suggested_action="Check data type conversion"
+                        ))
+            
+            # OHLC consistency checks
+            if len(ohlc_values) >= 2:
+                high = ohlc_values.get("high_price")
+                low = ohlc_values.get("low_price")
+                open_price = ohlc_values.get("open_price")
+                close = ohlc_values.get("close_price")
+                
+                if high and low and high < low:
+                    issues.append(QualityIssue(
+                        check_type=QualityCheckType.CONSISTENCY,
+                        severity=SeverityLevel.ERROR,
+                        symbol=value.symbol or "",
+                        data_type=value.data_type,
+                        data_date=value.value_date,
+                        issue_date=datetime.utcnow(),
+                        description=f"High price {high} < Low price {low}",
+                        details={"high": float(high), "low": float(low)},
+                        suggested_action="Check OHLC data consistency"
+                    ))
+                
+                if high and open_price and open_price > high:
+                    issues.append(QualityIssue(
+                        check_type=QualityCheckType.CONSISTENCY,
+                        severity=SeverityLevel.ERROR,
+                        symbol=value.symbol or "",
+                        data_type=value.data_type,
+                        data_date=value.value_date,
+                        issue_date=datetime.utcnow(),
+                        description=f"Open price {open_price} > High price {high}",
+                        details={"open": float(open_price), "high": float(high)},
+                        suggested_action="Check OHLC data consistency"
+                    ))
+                
+                if low and close and close < low:
+                    issues.append(QualityIssue(
+                        check_type=QualityCheckType.CONSISTENCY,
+                        severity=SeverityLevel.ERROR,
+                        symbol=value.symbol or "",
+                        data_type=value.data_type,
+                        data_date=value.value_date,
+                        issue_date=datetime.utcnow(),
+                        description=f"Close price {close} < Low price {low}",
+                        details={"close": float(close), "low": float(low)},
+                        suggested_action="Check OHLC data consistency"
+                    ))
+        
+        return issues
+
+
+class ConsistencyValidator(ValidationPlugin):
+    """Validates data consistency across related fields and time periods."""
+    
+    def __init__(self):
+        self.consistency_rules = {
+            # Market cap should be price * shares outstanding
+            "market_cap_consistency": {
+                "fields": ["close_price", "outstanding_shares", "market_cap"],
+                "tolerance": 0.01  # 1% tolerance
+            }
+        }
+    
+    @property
+    def name(self) -> str:
+        return "consistency_validator"
+    
+    @property
+    def version(self) -> str:
+        return "1.0.0"
+    
+    @property
+    def priority(self) -> ValidationPriority:
+        return ValidationPriority.MEDIUM
+    
+    @property
+    def supported_data_types(self) -> Set[DataType]:
+        return {DataType.MARKET_DATA, DataType.FUNDAMENTAL}
+    
+    def can_validate(self, value: TemporalValue, context: ValidationContext) -> bool:
+        """Check if this validator can process the given value."""
+        return value.data_type in self.supported_data_types
+    
+    async def validate(self, value: TemporalValue, context: ValidationContext) -> ValidationOutput:
+        """Perform consistency validation."""
+        start_time = datetime.utcnow()
+        issues = []
+        
+        try:
+            if isinstance(value.value, dict):
+                # Check market cap consistency
+                issues.extend(self._check_market_cap_consistency(value))
+                
+                # Check financial ratios consistency
+                if value.data_type == DataType.FUNDAMENTAL:
+                    issues.extend(self._check_financial_ratios_consistency(value))
+        
+        except Exception as e:
+            logger.error(f"Error in consistency validation: {e}")
+            issues.append(QualityIssue(
+                check_type=QualityCheckType.VALIDITY,
+                severity=SeverityLevel.ERROR,
+                symbol=value.symbol or "",
+                data_type=value.data_type,
+                data_date=value.value_date,
+                issue_date=datetime.utcnow(),
+                description=f"Validation error: {str(e)}"
+            ))
+        
+        result = ValidationResult.PASS if not issues else ValidationResult.WARNING
+        execution_time = (datetime.utcnow() - start_time).total_seconds() * 1000
+        
+        return ValidationOutput(
+            validator_name=self.name,
+            validation_id=f"{self.name}_{int(start_time.timestamp())}",
+            result=result,
+            issues=issues,
+            execution_time_ms=execution_time
+        )
+    
+    def _check_market_cap_consistency(self, value: TemporalValue) -> List[QualityIssue]:
+        """Check market capitalization consistency."""
+        issues = []
+        data = value.value
+        
+        required_fields = ["close_price", "outstanding_shares", "market_cap"]
+        if all(field in data and data[field] is not None for field in required_fields):
+            try:
+                price = Decimal(str(data["close_price"]))
+                shares = Decimal(str(data["outstanding_shares"]))
+                reported_market_cap = Decimal(str(data["market_cap"]))
+                
+                calculated_market_cap = price * shares
+                tolerance = self.consistency_rules["market_cap_consistency"]["tolerance"]
+                
+                if calculated_market_cap > 0:
+                    relative_diff = abs(calculated_market_cap - reported_market_cap) / calculated_market_cap
+                    
+                    if relative_diff > tolerance:
+                        issues.append(QualityIssue(
+                            check_type=QualityCheckType.CONSISTENCY,
+                            severity=SeverityLevel.WARNING,
+                            symbol=value.symbol or "",
+                            data_type=value.data_type,
+                            data_date=value.value_date,
+                            issue_date=datetime.utcnow(),
+                            description=f"Market cap inconsistency: calculated {calculated_market_cap}, reported {reported_market_cap}",
+                            details={
+                                "calculated_market_cap": float(calculated_market_cap),
+                                "reported_market_cap": float(reported_market_cap),
+                                "relative_difference": float(relative_diff),
+                                "tolerance": tolerance
+                            },
+                            suggested_action="Verify market cap calculation or outstanding shares data"
+                        ))
+            
+            except (ValueError, TypeError, ZeroDivisionError) as e:
+                issues.append(QualityIssue(
+                    check_type=QualityCheckType.CONSISTENCY,
+                    severity=SeverityLevel.WARNING,
+                    symbol=value.symbol or "",
+                    data_type=value.data_type,
+                    data_date=value.value_date,
+                    issue_date=datetime.utcnow(),
+                    description=f"Market cap consistency check failed: {e}",
+                    suggested_action="Check data types and values"
+                ))
+        
+        return issues
+    
+    def _check_financial_ratios_consistency(self, value: TemporalValue) -> List[QualityIssue]:
+        """Check financial ratios consistency."""
+        issues = []
+        data = value.value
+        
+        # Check if ROE = Net Income / Total Equity
+        if all(field in data and data[field] is not None for field in ["roe", "net_income", "total_equity"]):
+            try:
+                reported_roe = Decimal(str(data["roe"]))
+                net_income = Decimal(str(data["net_income"]))
+                total_equity = Decimal(str(data["total_equity"]))
+                
+                if total_equity != 0:
+                    calculated_roe = net_income / total_equity
+                    tolerance = 0.01  # 1% tolerance
+                    
+                    if abs(calculated_roe - reported_roe) / max(abs(calculated_roe), abs(reported_roe)) > tolerance:
+                        issues.append(QualityIssue(
+                            check_type=QualityCheckType.CONSISTENCY,
+                            severity=SeverityLevel.WARNING,
+                            symbol=value.symbol or "",
+                            data_type=value.data_type,
+                            data_date=value.value_date,
+                            issue_date=datetime.utcnow(),
+                            description=f"ROE inconsistency: calculated {calculated_roe:.4f}, reported {reported_roe:.4f}",
+                            details={
+                                "calculated_roe": float(calculated_roe),
+                                "reported_roe": float(reported_roe),
+                                "net_income": float(net_income),
+                                "total_equity": float(total_equity)
+                            },
+                            suggested_action="Verify ROE calculation"
+                        ))
+            
+            except (ValueError, TypeError, ZeroDivisionError):
+                pass  # Skip if calculation fails
+        
+        return issues
+
+
+# Factory function for creating enhanced validators
+
+def create_enhanced_validators() -> List[ValidationPlugin]:
+    """Create enhanced validation plugins."""
+    
+    # Required fields by data type
+    required_fields = {
+        DataType.PRICE: {"close_price"},
+        DataType.VOLUME: {"volume"},
+        DataType.FUNDAMENTAL: {"revenue", "net_income"},
+        DataType.MARKET_DATA: {"close_price", "volume"}
+    }
+    
+    return [
+        EnhancedCompletenessValidator(required_fields),
+        EnhancedAccuracyValidator(),
+        ConsistencyValidator()
+    ]
