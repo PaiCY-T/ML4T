@@ -2,10 +2,12 @@
 name: ML4T-Alpha-Rebuild
 status: active
 created: 2025-09-23T08:00:00Z
+updated: 2025-09-23T14:14:18Z
 progress: 0%
 prd: .claude/prds/ML4T-Alpha-Rebuild.md
 parent_epic: ML4T
 priority: critical
+github: https://github.com/PaiCY-T/ML4T/issues/20
 ---
 
 # Epic: ML4T-Alpha Complete Rebuild (True ML Implementation)
@@ -197,3 +199,22 @@ priority: critical
 - 20%+ annual return target achievement
 
 This epic transforms a broken rule-based system into a world-class ML-driven quantitative strategy, addressing all identified gaps while building on existing UBVS infrastructure.
+
+## Tasks Created
+- [ ] #21 - Point-in-Time Data Management System (parallel: false)
+- [ ] #22 - Data Quality Validation Framework (parallel: false)
+- [ ] #23 - Walk-Forward Validation Engine (parallel: true)
+- [ ] #24 - Transaction Cost Modeling (parallel: true)
+- [ ] #25 - 42 Handcrafted Factors Implementation (parallel: false)
+- [ ] #26 - LightGBM Model Pipeline (parallel: false)
+- [ ] #27 - Model Validation & Monitoring (parallel: true)
+- [ ] #28 - OpenFE Setup & Integration (parallel: true)
+- [ ] #29 - Feature Selection & Correlation Filtering (parallel: false)
+- [ ] #30 - Production Readiness Testing (parallel: true)
+- [ ] #31 - Real-Time Production System (parallel: false)
+- [ ] #32 - Monitoring & Automated Retraining (parallel: false)
+
+Total tasks: 12
+Parallel tasks: 5 (can be worked on simultaneously)
+Sequential tasks: 7 (have dependencies)
+Estimated total effort: 35-42 hours
