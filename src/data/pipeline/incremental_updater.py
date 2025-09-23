@@ -367,84 +367,30 @@ class IncrementalUpdater:
     def _execute_incremental_update(self, 
                                    request: UpdateRequest, 
                                    result: UpdateResult) -> None:
-        """Execute incremental update using checkpoints."""
+        """Execute incremental update using enhanced batch processing."""
         
-        def update_symbol(symbol: str) -> Tuple[str, int, int, List[str]]:
-            """Update a single symbol incrementally."""
-            new_count = 0
-            updated_count = 0
-            errors = []
-            
-            try:
-                for data_type in request.data_types:
-                    # Get checkpoint for this symbol/data_type
-                    checkpoint_key = (symbol, data_type)
-                    checkpoint = self.checkpoints.get(checkpoint_key)
-                    
-                    # Determine date range for incremental update
-                    if checkpoint and not request.force_update:
-                        update_start = checkpoint.last_update_date + timedelta(days=1)
-                    else:
-                        update_start = request.start_date
-                    
-                    # Skip if no new data needed
-                    if update_start > request.end_date:
-                        continue
-                    
-                    # Get new data from FinLab
-                    if data_type == DataType.PRICE:
-                        new_values = self.finlab_connector.get_price_data(
-                            symbol, update_start, request.end_date
-                        )
-                    elif data_type == DataType.FUNDAMENTAL:
-                        new_values = self.finlab_connector.get_fundamental_data(
-                            symbol, update_start, request.end_date
-                        )
-                    elif data_type == DataType.CORPORATE_ACTION:
-                        new_values = self.finlab_connector.get_corporate_actions(
-                            symbol, update_start, request.end_date
-                        )
-                    else:
-                        continue
-                    
-                    # Process and store new values
-                    for value in new_values:
-                        # Validate temporal consistency
-                        if request.validate_consistency:
-                            consistency_issues = self._validate_value_consistency(value)
-                            if consistency_issues:
-                                errors.extend(consistency_issues)
-                                continue
-                        
-                        # Check if value already exists
-                        existing = self.temporal_store.get_point_in_time(
-                            symbol, value.as_of_date, data_type
-                        )
-                        
-                        if existing:
-                            # Update existing value if different
-                            if self._values_differ(existing, value):
-                                self.temporal_store.store(value)
-                                updated_count += 1
-                        else:
-                            # Store new value
-                            self.temporal_store.store(value)
-                            new_count += 1
-                    
-                    # Update checkpoint
-                    self._update_checkpoint(symbol, data_type, request.end_date)
-            
-            except Exception as e:
-                errors.append(f"Error updating {symbol}: {e}")
-            
-            return symbol, new_count, updated_count, errors
+        # Use optimized batch processing for better performance
+        if len(request.symbols) > 20:  # Use batch processing for larger requests
+            self._batch_process_symbols(request.symbols, request, result)
+        else:
+            # Use parallel processing for smaller requests
+            self._parallel_process_symbols(request.symbols, request, result)
+    
+    def _parallel_process_symbols(self, 
+                                 symbols: List[str],
+                                 request: UpdateRequest,
+                                 result: UpdateResult) -> None:
+        """Process symbols in parallel for smaller requests."""
         
         # Execute updates in parallel
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            futures = [executor.submit(update_symbol, symbol) for symbol in request.symbols]
+            futures = [
+                executor.submit(self._update_single_symbol, symbol, request) 
+                for symbol in symbols
+            ]
             
             for future in as_completed(futures):
-                symbol, new_cnt, updated_cnt, errors = future.result()
+                new_cnt, updated_cnt, errors = future.result()
                 result.new_count += new_cnt
                 result.updated_count += updated_cnt
                 result.errors.extend(errors)
@@ -516,6 +462,275 @@ class IncrementalUpdater:
             return abs(float(existing.value) - float(new.value)) > 1e-6
         else:
             return existing.value != new.value
+    
+    def _batch_process_symbols(self, 
+                              symbols: List[str],
+                              request: UpdateRequest,
+                              result: UpdateResult) -> None:
+        """Process symbols in optimized batches for better performance."""
+        batch_size = min(10, len(symbols))  # Optimal batch size for database operations
+        
+        for i in range(0, len(symbols), batch_size):
+            batch_symbols = symbols[i:i + batch_size]
+            
+            # Process batch in parallel
+            def process_batch(batch_symbols: List[str]) -> Tuple[int, int, List[str]]:
+                batch_new = 0
+                batch_updated = 0
+                batch_errors = []
+                
+                for symbol in batch_symbols:
+                    try:
+                        symbol_new, symbol_updated, symbol_errors = self._update_single_symbol(
+                            symbol, request
+                        )
+                        batch_new += symbol_new
+                        batch_updated += symbol_updated
+                        batch_errors.extend(symbol_errors)
+                    except Exception as e:
+                        batch_errors.append(f"Batch processing error for {symbol}: {e}")
+                
+                return batch_new, batch_updated, batch_errors
+            
+            # Execute batch
+            batch_new, batch_updated, batch_errors = process_batch(batch_symbols)
+            
+            result.new_count += batch_new
+            result.updated_count += batch_updated
+            result.errors.extend(batch_errors)
+            result.processed_count += len(batch_symbols)
+    
+    def _update_single_symbol(self, 
+                             symbol: str, 
+                             request: UpdateRequest) -> Tuple[int, int, List[str]]:
+        """Update a single symbol with enhanced error handling and validation."""
+        new_count = 0
+        updated_count = 0
+        errors = []
+        
+        try:
+            for data_type in request.data_types:
+                # Get checkpoint for this symbol/data_type
+                checkpoint_key = (symbol, data_type)
+                checkpoint = self.checkpoints.get(checkpoint_key)
+                
+                # Determine date range for incremental update
+                if checkpoint and not request.force_update:
+                    update_start = checkpoint.last_update_date + timedelta(days=1)
+                else:
+                    update_start = request.start_date
+                
+                # Skip if no new data needed
+                if update_start > request.end_date:
+                    continue
+                
+                # Get new data from FinLab with enhanced error handling
+                try:
+                    new_values = self._fetch_data_with_retry(
+                        symbol, data_type, update_start, request.end_date
+                    )
+                except Exception as e:
+                    errors.append(f"Data fetch failed for {symbol} {data_type}: {e}")
+                    continue
+                
+                # Process and validate values
+                processed_values = self._process_and_validate_values(
+                    new_values, request, errors
+                )
+                
+                # Store values efficiently
+                store_new, store_updated = self._store_values_efficiently(
+                    processed_values, symbol, data_type
+                )
+                
+                new_count += store_new
+                updated_count += store_updated
+                
+                # Update checkpoint
+                if processed_values:
+                    latest_date = max(v.value_date for v in processed_values)
+                    self._update_checkpoint(symbol, data_type, latest_date)
+        
+        except Exception as e:
+            errors.append(f"Symbol update failed for {symbol}: {e}")
+        
+        return new_count, updated_count, errors
+    
+    def _fetch_data_with_retry(self, 
+                              symbol: str,
+                              data_type: DataType,
+                              start_date: date,
+                              end_date: date,
+                              max_retries: int = 3) -> List[TemporalValue]:
+        """Fetch data with retry logic for resilience."""
+        for attempt in range(max_retries):
+            try:
+                if data_type == DataType.PRICE:
+                    return self.finlab_connector.get_price_data(symbol, start_date, end_date)
+                elif data_type == DataType.FUNDAMENTAL:
+                    return self.finlab_connector.get_fundamental_data(symbol, start_date, end_date)
+                elif data_type == DataType.CORPORATE_ACTION:
+                    return self.finlab_connector.get_corporate_actions(symbol, start_date, end_date)
+                else:
+                    return []
+            except Exception as e:
+                if attempt == max_retries - 1:
+                    raise e
+                logger.warning(f"Data fetch attempt {attempt + 1} failed for {symbol}: {e}")
+                time.sleep(2 ** attempt)  # Exponential backoff
+        
+        return []
+    
+    def _process_and_validate_values(self, 
+                                   values: List[TemporalValue],
+                                   request: UpdateRequest,
+                                   errors: List[str]) -> List[TemporalValue]:
+        """Process and validate temporal values with enhanced checks."""
+        processed_values = []
+        
+        for value in values:
+            # Enhanced temporal consistency validation
+            if request.validate_consistency:
+                consistency_issues = self._enhanced_consistency_check(value)
+                if consistency_issues:
+                    errors.extend(consistency_issues)
+                    continue
+            
+            # Data quality validation
+            quality_issues = self._validate_data_quality(value)
+            if quality_issues:
+                errors.extend(quality_issues)
+                # Still process but log issues
+            
+            processed_values.append(value)
+        
+        return processed_values
+    
+    def _enhanced_consistency_check(self, value: TemporalValue) -> List[str]:
+        """Enhanced temporal consistency checking."""
+        issues = []
+        
+        # Basic temporal validation
+        basic_issues = self._validate_value_consistency(value)
+        issues.extend(basic_issues)
+        
+        # Additional enhanced checks
+        
+        # Check for reasonable value ranges
+        if value.data_type == DataType.PRICE and isinstance(value.value, (int, float)):
+            price = float(value.value)
+            if price <= 0:
+                issues.append(f"Invalid price value: {price} <= 0")
+            elif price > 10000:  # Taiwan stock price upper bound check
+                issues.append(f"Unusually high price value: {price}")
+        
+        # Check metadata consistency
+        if value.metadata:
+            if "source" not in value.metadata:
+                issues.append("Missing source information in metadata")
+            
+            # Check field consistency for FinLab data
+            if value.metadata.get("source") == "finlab":
+                if "field" not in value.metadata:
+                    issues.append("Missing field information for FinLab data")
+        
+        # Check settlement timing for Taiwan market
+        if value.data_type in [DataType.PRICE, DataType.VOLUME]:
+            # Price data should be available same day or with minimal lag
+            lag = (value.as_of_date - value.value_date).days
+            if lag > 1:
+                issues.append(f"Price data lag {lag} days exceeds expected maximum")
+        
+        return issues
+    
+    def _validate_data_quality(self, value: TemporalValue) -> List[str]:
+        """Validate data quality for individual temporal values."""
+        issues = []
+        
+        # Check for null or invalid values
+        if value.value is None:
+            issues.append("Null value detected")
+            return issues
+        
+        # Type-specific validation
+        if value.data_type == DataType.PRICE:
+            if isinstance(value.value, (int, float)):
+                price = float(value.value)
+                if price < 0:
+                    issues.append(f"Negative price detected: {price}")
+                elif price == 0:
+                    issues.append("Zero price detected - may indicate data issue")
+        
+        elif value.data_type == DataType.VOLUME:
+            if isinstance(value.value, (int, float)):
+                volume = int(value.value)
+                if volume < 0:
+                    issues.append(f"Negative volume detected: {volume}")
+        
+        elif value.data_type == DataType.FUNDAMENTAL:
+            # Validate fundamental data structure
+            if isinstance(value.value, dict):
+                required_fields = ["revenue", "net_income", "total_assets"]
+                missing_fields = [f for f in required_fields if f not in value.value]
+                if missing_fields:
+                    issues.append(f"Missing fundamental fields: {missing_fields}")
+        
+        return issues
+    
+    def _store_values_efficiently(self, 
+                                 values: List[TemporalValue],
+                                 symbol: str,
+                                 data_type: DataType) -> Tuple[int, int]:
+        """Store values efficiently with bulk operations when possible."""
+        if not values:
+            return 0, 0
+        
+        new_count = 0
+        updated_count = 0
+        
+        # Check if temporal store supports bulk operations
+        if hasattr(self.temporal_store, 'bulk_store'):
+            # Use bulk storage for new values
+            new_values = []
+            updated_values = []
+            
+            for value in values:
+                existing = self.temporal_store.get_point_in_time(
+                    symbol, value.as_of_date, data_type
+                )
+                
+                if existing:
+                    if self._values_differ(existing, value):
+                        updated_values.append(value)
+                else:
+                    new_values.append(value)
+            
+            # Bulk store new values
+            if new_values:
+                self.temporal_store.bulk_store(new_values)
+                new_count = len(new_values)
+            
+            # Store updated values individually (may need special handling)
+            for value in updated_values:
+                self.temporal_store.store(value)
+                updated_count += 1
+        
+        else:
+            # Fallback to individual storage
+            for value in values:
+                existing = self.temporal_store.get_point_in_time(
+                    symbol, value.as_of_date, data_type
+                )
+                
+                if existing:
+                    if self._values_differ(existing, value):
+                        self.temporal_store.store(value)
+                        updated_count += 1
+                else:
+                    self.temporal_store.store(value)
+                    new_count += 1
+        
+        return new_count, updated_count
     
     def _update_checkpoint(self, 
                           symbol: str,

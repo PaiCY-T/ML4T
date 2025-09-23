@@ -20,7 +20,10 @@ import asyncio
 import aiohttp
 from concurrent.futures import ThreadPoolExecutor
 
-from ..core.temporal import TemporalValue, DataType, TemporalStore
+from ..core.temporal import (
+    TemporalValue, DataType, TemporalStore, 
+    is_taiwan_trading_day, get_previous_trading_day
+)
 from ..models.taiwan_market import (
     TaiwanMarketData, TaiwanFundamental, TaiwanCorporateAction,
     CorporateActionType, TradingStatus, TaiwanMarketDataValidator
@@ -565,6 +568,222 @@ class FinLabConnector:
             issues.append(f"Data validation error: {e}")
         
         return issues
+    
+    def validate_data_completeness(self, 
+                                  symbol: str,
+                                  start_date: date,
+                                  end_date: date,
+                                  data_types: List[DataType]) -> Dict[str, Any]:
+        """Validate data completeness for a symbol across date range."""
+        validation_report = {
+            "symbol": symbol,
+            "date_range": (start_date, end_date),
+            "total_trading_days": 0,
+            "missing_data_days": [],
+            "data_type_coverage": {},
+            "quality_issues": []
+        }
+        
+        try:
+            # Count expected trading days
+            current_date = start_date
+            trading_days = []
+            while current_date <= end_date:
+                if is_taiwan_trading_day(current_date):
+                    trading_days.append(current_date)
+                current_date += timedelta(days=1)
+            
+            validation_report["total_trading_days"] = len(trading_days)
+            
+            # Check each data type
+            for data_type in data_types:
+                if data_type == DataType.PRICE:
+                    values = self.get_price_data(symbol, start_date, end_date)
+                elif data_type == DataType.FUNDAMENTAL:
+                    values = self.get_fundamental_data(symbol, start_date, end_date)
+                elif data_type == DataType.CORPORATE_ACTION:
+                    values = self.get_corporate_actions(symbol, start_date, end_date)
+                else:
+                    continue
+                
+                # Analyze coverage
+                value_dates = set(v.value_date for v in values)
+                missing_dates = [d for d in trading_days if d not in value_dates]
+                
+                validation_report["data_type_coverage"][data_type.value] = {
+                    "total_values": len(values),
+                    "coverage_rate": (len(trading_days) - len(missing_dates)) / max(len(trading_days), 1),
+                    "missing_dates": [d.isoformat() for d in missing_dates[:10]]  # Limit output
+                }
+                
+                # Accumulate missing dates
+                validation_report["missing_data_days"].extend(missing_dates)
+            
+            # Remove duplicates from missing dates
+            validation_report["missing_data_days"] = list(set(validation_report["missing_data_days"]))
+            validation_report["missing_data_days"].sort()
+            
+        except Exception as e:
+            validation_report["quality_issues"].append(f"Completeness validation error: {e}")
+        
+        return validation_report
+    
+    def get_data_quality_metrics(self, 
+                                symbol: str,
+                                lookback_days: int = 30) -> Dict[str, Any]:
+        """Get comprehensive data quality metrics for a symbol."""
+        end_date = date.today()
+        start_date = end_date - timedelta(days=lookback_days)
+        
+        metrics = {
+            "symbol": symbol,
+            "analysis_period": (start_date, end_date),
+            "price_data_metrics": {},
+            "fundamental_data_metrics": {},
+            "overall_quality_score": 0.0,
+            "issues_found": [],
+            "recommendations": []
+        }
+        
+        try:
+            # Price data quality metrics
+            price_values = self.get_price_data(symbol, start_date, end_date)
+            if price_values:
+                price_metrics = self._analyze_price_data_quality(price_values)
+                metrics["price_data_metrics"] = price_metrics
+            
+            # Fundamental data quality metrics
+            fundamental_values = self.get_fundamental_data(symbol, start_date, end_date)
+            if fundamental_values:
+                fundamental_metrics = self._analyze_fundamental_data_quality(fundamental_values)
+                metrics["fundamental_data_metrics"] = fundamental_metrics
+            
+            # Calculate overall quality score
+            metrics["overall_quality_score"] = self._calculate_quality_score(metrics)
+            
+            # Generate recommendations
+            metrics["recommendations"] = self._generate_quality_recommendations(metrics)
+            
+        except Exception as e:
+            metrics["issues_found"].append(f"Quality metrics analysis error: {e}")
+        
+        return metrics
+    
+    def _analyze_price_data_quality(self, values: List[TemporalValue]) -> Dict[str, Any]:
+        """Analyze price data quality metrics."""
+        if not values:
+            return {"error": "No price data available"}
+        
+        price_values = [float(v.value) for v in values if v.value is not None]
+        
+        metrics = {
+            "total_records": len(values),
+            "non_null_records": len(price_values),
+            "null_rate": (len(values) - len(price_values)) / len(values),
+            "data_gaps": 0,
+            "outliers_detected": 0,
+            "volatility_spike_days": 0
+        }
+        
+        if len(price_values) > 1:
+            # Calculate daily returns for outlier detection
+            returns = []
+            for i in range(1, len(price_values)):
+                ret = (price_values[i] - price_values[i-1]) / price_values[i-1]
+                returns.append(ret)
+            
+            if returns:
+                import statistics
+                mean_return = statistics.mean(returns)
+                std_return = statistics.stdev(returns) if len(returns) > 1 else 0
+                
+                # Detect outliers (returns > 3 standard deviations)
+                outliers = [r for r in returns if abs(r - mean_return) > 3 * std_return]
+                metrics["outliers_detected"] = len(outliers)
+                
+                # Detect volatility spikes (returns > 5%)
+                spikes = [r for r in returns if abs(r) > 0.05]
+                metrics["volatility_spike_days"] = len(spikes)
+        
+        return metrics
+    
+    def _analyze_fundamental_data_quality(self, values: List[TemporalValue]) -> Dict[str, Any]:
+        """Analyze fundamental data quality metrics."""
+        if not values:
+            return {"error": "No fundamental data available"}
+        
+        metrics = {
+            "total_records": len(values),
+            "unique_periods": len(set((v.metadata.get("fiscal_year"), v.metadata.get("fiscal_quarter")) 
+                                   for v in values if v.metadata)),
+            "avg_reporting_lag_days": 0,
+            "max_reporting_lag_days": 0,
+            "late_filings": 0
+        }
+        
+        lag_days = []
+        for value in values:
+            if value.metadata and "lag_days" in value.metadata:
+                lag = value.metadata["lag_days"]
+                lag_days.append(lag)
+                if lag > 60:  # Taiwan regulatory limit
+                    metrics["late_filings"] += 1
+        
+        if lag_days:
+            metrics["avg_reporting_lag_days"] = sum(lag_days) / len(lag_days)
+            metrics["max_reporting_lag_days"] = max(lag_days)
+        
+        return metrics
+    
+    def _calculate_quality_score(self, metrics: Dict[str, Any]) -> float:
+        """Calculate overall data quality score (0-100)."""
+        score = 100.0
+        
+        # Price data quality impact
+        price_metrics = metrics.get("price_data_metrics", {})
+        if price_metrics:
+            null_rate = price_metrics.get("null_rate", 0)
+            score -= null_rate * 30  # Up to 30 points for data completeness
+            
+            outliers_rate = price_metrics.get("outliers_detected", 0) / max(price_metrics.get("total_records", 1), 1)
+            score -= outliers_rate * 20  # Up to 20 points for outliers
+        
+        # Fundamental data quality impact
+        fundamental_metrics = metrics.get("fundamental_data_metrics", {})
+        if fundamental_metrics:
+            late_filings_rate = fundamental_metrics.get("late_filings", 0) / max(fundamental_metrics.get("total_records", 1), 1)
+            score -= late_filings_rate * 15  # Up to 15 points for late filings
+        
+        return max(0.0, min(100.0, score))
+    
+    def _generate_quality_recommendations(self, metrics: Dict[str, Any]) -> List[str]:
+        """Generate data quality improvement recommendations."""
+        recommendations = []
+        
+        price_metrics = metrics.get("price_data_metrics", {})
+        if price_metrics:
+            if price_metrics.get("null_rate", 0) > 0.05:
+                recommendations.append("High null rate in price data - investigate data source reliability")
+            
+            if price_metrics.get("outliers_detected", 0) > 5:
+                recommendations.append("Multiple price outliers detected - review data validation rules")
+            
+            if price_metrics.get("volatility_spike_days", 0) > 3:
+                recommendations.append("High volatility detected - verify corporate actions and news events")
+        
+        fundamental_metrics = metrics.get("fundamental_data_metrics", {})
+        if fundamental_metrics:
+            if fundamental_metrics.get("late_filings", 0) > 0:
+                recommendations.append("Late fundamental data filings detected - monitor regulatory compliance")
+            
+            if fundamental_metrics.get("avg_reporting_lag_days", 0) > 45:
+                recommendations.append("High average reporting lag - consider alternative data sources")
+        
+        overall_score = metrics.get("overall_quality_score", 100)
+        if overall_score < 80:
+            recommendations.append("Overall data quality below threshold - comprehensive review recommended")
+        
+        return recommendations
     
     def get_performance_stats(self) -> Dict[str, Any]:
         """Get connector performance statistics."""

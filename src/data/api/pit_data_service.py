@@ -164,6 +164,54 @@ class DataQualityResponse(BaseModel):
     warnings: List[str] = []
 
 
+class DataCompletenessRequest(BaseModel):
+    """Data completeness validation request."""
+    symbol: str = Field(..., regex=r'^\d{4}$')
+    start_date: date
+    end_date: date
+    data_types: List[DataTypeEnum] = Field(..., min_items=1)
+
+
+class DataCompletenessResponse(BaseModel):
+    """Data completeness validation response."""
+    symbol: str
+    date_range: Tuple[date, date]
+    total_trading_days: int
+    missing_data_days: List[date] = []
+    data_type_coverage: Dict[str, Dict[str, Any]] = {}
+    quality_issues: List[str] = []
+
+
+class DataQualityMetricsResponse(BaseModel):
+    """Data quality metrics response."""
+    symbol: str
+    analysis_period: Tuple[date, date]
+    price_data_metrics: Dict[str, Any] = {}
+    fundamental_data_metrics: Dict[str, Any] = {}
+    overall_quality_score: float
+    issues_found: List[str] = []
+    recommendations: List[str] = []
+
+
+class SymbolSearchRequest(BaseModel):
+    """Symbol search request."""
+    query: str = Field(..., min_length=1, max_length=10)
+    market_type: Optional[str] = None
+    sector: Optional[str] = None
+    limit: int = Field(20, ge=1, le=100)
+
+
+class SymbolInfoResponse(BaseModel):
+    """Symbol information response."""
+    symbol: str
+    company_name: str
+    industry: Optional[str] = None
+    sector: Optional[str] = None
+    listing_date: Optional[date] = None
+    market_type: Optional[str] = None
+    outstanding_shares: Optional[int] = None
+
+
 # Service class
 
 class PITDataService:
@@ -443,6 +491,157 @@ class PITDataService:
             return {"message": "Background update triggered"}
         else:
             return {"message": "Background updates not available"}
+    
+    async def validate_data_completeness(self, request: DataCompletenessRequest) -> DataCompletenessResponse:
+        """Validate data completeness for a symbol."""
+        try:
+            if self.finlab_connector:
+                # Convert API data types to internal types
+                internal_data_types = self._convert_data_types(request.data_types)
+                
+                completeness_report = self.finlab_connector.validate_data_completeness(
+                    request.symbol,
+                    request.start_date,
+                    request.end_date,
+                    internal_data_types
+                )
+                
+                return DataCompletenessResponse(
+                    symbol=completeness_report["symbol"],
+                    date_range=completeness_report["date_range"],
+                    total_trading_days=completeness_report["total_trading_days"],
+                    missing_data_days=completeness_report["missing_data_days"],
+                    data_type_coverage=completeness_report["data_type_coverage"],
+                    quality_issues=completeness_report["quality_issues"]
+                )
+            else:
+                raise HTTPException(
+                    status_code=503, 
+                    detail="Data completeness validation not available - no connector configured"
+                )
+                
+        except Exception as e:
+            logger.error(f"Data completeness validation failed: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+    
+    async def get_data_quality_metrics(self, symbol: str, lookback_days: int = 30) -> DataQualityMetricsResponse:
+        """Get comprehensive data quality metrics for a symbol."""
+        try:
+            if self.finlab_connector:
+                metrics = self.finlab_connector.get_data_quality_metrics(symbol, lookback_days)
+                
+                return DataQualityMetricsResponse(
+                    symbol=metrics["symbol"],
+                    analysis_period=metrics["analysis_period"],
+                    price_data_metrics=metrics["price_data_metrics"],
+                    fundamental_data_metrics=metrics["fundamental_data_metrics"],
+                    overall_quality_score=metrics["overall_quality_score"],
+                    issues_found=metrics["issues_found"],
+                    recommendations=metrics["recommendations"]
+                )
+            else:
+                raise HTTPException(
+                    status_code=503,
+                    detail="Data quality metrics not available - no connector configured"
+                )
+                
+        except Exception as e:
+            logger.error(f"Data quality metrics failed: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+    
+    async def search_symbols(self, request: SymbolSearchRequest) -> List[SymbolInfoResponse]:
+        """Search for symbols based on query criteria."""
+        try:
+            if self.finlab_connector:
+                # Get available symbols
+                all_symbols = self.finlab_connector.get_available_symbols()
+                
+                # Filter symbols based on query
+                matching_symbols = []
+                for symbol in all_symbols:
+                    if request.query.lower() in symbol.lower():
+                        symbol_info = self.finlab_connector.get_symbol_info(symbol)
+                        if symbol_info:
+                            # Apply additional filters
+                            if request.market_type and symbol_info.get("market_type") != request.market_type:
+                                continue
+                            if request.sector and symbol_info.get("sector") != request.sector:
+                                continue
+                            
+                            matching_symbols.append(SymbolInfoResponse(
+                                symbol=symbol_info["symbol"],
+                                company_name=symbol_info.get("company_name", ""),
+                                industry=symbol_info.get("industry"),
+                                sector=symbol_info.get("sector"),
+                                listing_date=symbol_info.get("listing_date"),
+                                market_type=symbol_info.get("market_type"),
+                                outstanding_shares=symbol_info.get("outstanding_shares")
+                            ))
+                            
+                            if len(matching_symbols) >= request.limit:
+                                break
+                
+                return matching_symbols
+            else:
+                raise HTTPException(
+                    status_code=503,
+                    detail="Symbol search not available - no connector configured"
+                )
+                
+        except Exception as e:
+            logger.error(f"Symbol search failed: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+    
+    async def get_symbol_info(self, symbol: str) -> SymbolInfoResponse:
+        """Get detailed information for a specific symbol."""
+        try:
+            if self.finlab_connector:
+                symbol_info = self.finlab_connector.get_symbol_info(symbol)
+                
+                if symbol_info:
+                    return SymbolInfoResponse(
+                        symbol=symbol_info["symbol"],
+                        company_name=symbol_info.get("company_name", ""),
+                        industry=symbol_info.get("industry"),
+                        sector=symbol_info.get("sector"),
+                        listing_date=symbol_info.get("listing_date"),
+                        market_type=symbol_info.get("market_type"),
+                        outstanding_shares=symbol_info.get("outstanding_shares")
+                    )
+                else:
+                    raise HTTPException(status_code=404, detail=f"Symbol {symbol} not found")
+            else:
+                raise HTTPException(
+                    status_code=503,
+                    detail="Symbol information not available - no connector configured"
+                )
+                
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Symbol info retrieval failed: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+    
+    async def stream_pit_data(self, request: PITQueryRequest):
+        """Stream point-in-time data for real-time applications."""
+        try:
+            # Convert to streaming response
+            async def generate_data():
+                # Execute the query
+                response = await self.execute_pit_query(request)
+                
+                # Yield data in streaming format
+                yield f"data: {response.json()}\n\n"
+            
+            return StreamingResponse(
+                generate_data(),
+                media_type="text/plain",
+                headers={"Cache-Control": "no-cache", "Connection": "keep-alive"}
+            )
+            
+        except Exception as e:
+            logger.error(f"Data streaming failed: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
 
 
 # FastAPI application factory
@@ -543,6 +742,69 @@ def create_api_app(pit_data_service: PITDataService) -> FastAPI:
     ):
         """Trigger background data update."""
         return await service.trigger_background_update(background_tasks)
+    
+    # Data completeness validation endpoint
+    @app.post("/data/quality/completeness", response_model=DataCompletenessResponse)
+    async def validate_data_completeness(
+        request: DataCompletenessRequest,
+        service: PITDataService = Depends(get_pit_service)
+    ):
+        """Validate data completeness for a symbol."""
+        return await service.validate_data_completeness(request)
+    
+    # Data quality metrics endpoint  
+    @app.get("/data/quality/metrics/{symbol}", response_model=DataQualityMetricsResponse)
+    async def get_data_quality_metrics(
+        symbol: str = Path(..., regex=r'^\d{4}$'),
+        lookback_days: int = Query(30, ge=1, le=365),
+        service: PITDataService = Depends(get_pit_service)
+    ):
+        """Get comprehensive data quality metrics for a symbol."""
+        return await service.get_data_quality_metrics(symbol, lookback_days)
+    
+    # Symbol search endpoint
+    @app.post("/symbols/search", response_model=List[SymbolInfoResponse])
+    async def search_symbols(
+        request: SymbolSearchRequest,
+        service: PITDataService = Depends(get_pit_service)
+    ):
+        """Search for symbols based on query criteria."""
+        return await service.search_symbols(request)
+    
+    # Symbol information endpoint
+    @app.get("/symbols/{symbol}", response_model=SymbolInfoResponse)
+    async def get_symbol_info(
+        symbol: str = Path(..., regex=r'^\d{4}$'),
+        service: PITDataService = Depends(get_pit_service)
+    ):
+        """Get detailed information for a specific symbol."""
+        return await service.get_symbol_info(symbol)
+    
+    # Available symbols endpoint
+    @app.get("/symbols", response_model=List[str])
+    async def get_available_symbols(
+        as_of_date: Optional[date] = Query(None),
+        limit: int = Query(100, ge=1, le=1000),
+        service: PITDataService = Depends(get_pit_service)
+    ):
+        """Get list of available symbols."""
+        if service.finlab_connector:
+            symbols = service.finlab_connector.get_available_symbols(as_of_date)
+            return symbols[:limit]
+        else:
+            raise HTTPException(
+                status_code=503,
+                detail="Symbol list not available - no connector configured"
+            )
+    
+    # Streaming data endpoint
+    @app.post("/data/pit/stream")
+    async def stream_pit_data(
+        request: PITQueryRequest,
+        service: PITDataService = Depends(get_pit_service)
+    ):
+        """Stream point-in-time data for real-time applications."""
+        return await service.stream_pit_data(request)
     
     # Statistics endpoint
     @app.get("/admin/stats")
