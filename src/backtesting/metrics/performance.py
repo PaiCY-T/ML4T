@@ -879,6 +879,275 @@ class WalkForwardPerformanceAnalyzer:
             }
         
         return consistency_metrics
+    
+    def run_performance_statistical_tests(
+        self,
+        validation_result: ValidationResult,
+        window_returns: Dict[str, pd.Series],
+        benchmark_name: str = "TAIEX"
+    ) -> Dict[str, Any]:
+        """
+        Run statistical tests on performance metrics across validation windows.
+        
+        Args:
+            validation_result: Walk-forward validation results
+            window_returns: Returns for each validation window
+            benchmark_name: Benchmark to compare against
+            
+        Returns:
+            Statistical test results for performance metrics
+        """
+        logger.info(f"Running performance statistical tests against {benchmark_name}")
+        
+        try:
+            # Import statistical testing components
+            from ..validation.statistical_tests import (
+                StatisticalTestEngine, create_default_statistical_config,
+                TestType, sharpe_ratio_statistic, information_ratio_statistic
+            )
+            from ..validation.benchmarks import (
+                TaiwanBenchmarkManager, create_default_benchmark_config
+            )
+            
+            # Initialize statistical testing
+            stat_config = create_default_statistical_config()
+            test_engine = StatisticalTestEngine(stat_config)
+            
+            # Initialize benchmark manager
+            bench_config = create_default_benchmark_config()
+            benchmark_manager = TaiwanBenchmarkManager(
+                bench_config, self.temporal_store, self.pit_engine
+            )
+            
+            # Get validation period
+            overall_start = min(window.test_start for window in validation_result.windows)
+            overall_end = max(window.test_end for window in validation_result.windows)
+            
+            # Get benchmark returns
+            benchmark_returns = benchmark_manager.get_benchmark_returns(
+                benchmark_name, overall_start, overall_end, list(window_returns.keys())
+            )
+            
+            # Collect performance metrics across windows
+            window_sharpe_ratios = []
+            window_information_ratios = []
+            window_max_drawdowns = []
+            window_total_returns = []
+            
+            # Calculate metrics for each window
+            for window in validation_result.windows:
+                if window.window_id in window_returns:
+                    returns = window_returns[window.window_id]
+                    
+                    if len(returns) > 0:
+                        # Get corresponding benchmark returns
+                        window_benchmark = benchmark_returns[
+                            benchmark_returns.index >= pd.Timestamp(window.test_start)
+                        ][
+                            benchmark_returns.index <= pd.Timestamp(window.test_end)
+                        ]
+                        
+                        # Align lengths
+                        min_length = min(len(returns), len(window_benchmark))
+                        if min_length > 5:  # Minimum observations
+                            aligned_returns = returns.iloc[:min_length]
+                            aligned_benchmark = window_benchmark.iloc[:min_length]
+                            
+                            # Calculate window metrics
+                            metrics = self.calculator.calculate_metrics(
+                                aligned_returns,
+                                aligned_benchmark,
+                                window.test_start,
+                                window.test_end
+                            )
+                            
+                            window_sharpe_ratios.append(metrics.sharpe_ratio)
+                            window_information_ratios.append(metrics.information_ratio)
+                            window_max_drawdowns.append(metrics.max_drawdown)
+                            window_total_returns.append(metrics.total_return)
+            
+            # Run statistical tests on performance metrics
+            statistical_results = {}
+            
+            if len(window_sharpe_ratios) >= 3:  # Minimum windows for testing
+                # Test if Sharpe ratios are significantly different from zero
+                sharpe_array = np.array(window_sharpe_ratios)
+                
+                try:
+                    from scipy.stats import ttest_1samp
+                    
+                    # T-test for Sharpe ratio significance
+                    t_stat, p_value = ttest_1samp(sharpe_array, 0)
+                    statistical_results['sharpe_ratio_ttest'] = {
+                        'statistic': float(t_stat),
+                        'p_value': float(p_value),
+                        'is_significant': p_value < 0.05,
+                        'mean_sharpe': float(np.mean(sharpe_array)),
+                        'std_sharpe': float(np.std(sharpe_array)),
+                        'num_windows': len(sharpe_array)
+                    }
+                    
+                    # Bootstrap confidence interval for mean Sharpe ratio
+                    sharpe_ci = test_engine.bootstrap_confidence_interval(
+                        sharpe_array,
+                        lambda x: np.mean(x)
+                    )
+                    statistical_results['sharpe_ratio_ci'] = sharpe_ci.to_dict()
+                    
+                except Exception as e:
+                    logger.warning(f"Sharpe ratio statistical tests failed: {e}")
+            
+            if len(window_information_ratios) >= 3:
+                # Test Information ratios
+                ir_array = np.array(window_information_ratios)
+                
+                try:
+                    # T-test for Information ratio significance
+                    t_stat, p_value = ttest_1samp(ir_array, 0)
+                    statistical_results['information_ratio_ttest'] = {
+                        'statistic': float(t_stat),
+                        'p_value': float(p_value),
+                        'is_significant': p_value < 0.05,
+                        'mean_ir': float(np.mean(ir_array)),
+                        'std_ir': float(np.std(ir_array)),
+                        'num_windows': len(ir_array)
+                    }
+                    
+                    # Bootstrap confidence interval for mean Information ratio
+                    ir_ci = test_engine.bootstrap_confidence_interval(
+                        ir_array,
+                        lambda x: np.mean(x)
+                    )
+                    statistical_results['information_ratio_ci'] = ir_ci.to_dict()
+                    
+                except Exception as e:
+                    logger.warning(f"Information ratio statistical tests failed: {e}")
+            
+            # Test consistency of performance across windows
+            if len(window_total_returns) >= 5:
+                returns_array = np.array(window_total_returns)
+                
+                try:
+                    # Test for consistency (percentage of positive windows)
+                    positive_windows = np.sum(returns_array > 0)
+                    total_windows = len(returns_array)
+                    positive_rate = positive_windows / total_windows
+                    
+                    # Binomial test for hit rate
+                    from scipy.stats import binom_test
+                    hit_rate_p_value = binom_test(positive_windows, total_windows, 0.5)
+                    
+                    statistical_results['consistency_test'] = {
+                        'positive_windows': int(positive_windows),
+                        'total_windows': int(total_windows),
+                        'positive_rate': float(positive_rate),
+                        'p_value': float(hit_rate_p_value),
+                        'is_significant': hit_rate_p_value < 0.05,
+                        'null_hypothesis': 'Hit rate = 50%'
+                    }
+                    
+                except Exception as e:
+                    logger.warning(f"Consistency test failed: {e}")
+            
+            # Cross-window correlation analysis
+            if len(window_sharpe_ratios) >= 5:
+                try:
+                    # Test for serial correlation in Sharpe ratios (stability)
+                    sharpe_series = pd.Series(window_sharpe_ratios)
+                    autocorr_1 = sharpe_series.autocorr(lag=1)
+                    
+                    # Ljung-Box test for serial correlation
+                    from statsmodels.stats.diagnostic import acorr_ljungbox
+                    lb_result = acorr_ljungbox(sharpe_series, lags=1, return_df=True)
+                    
+                    statistical_results['serial_correlation_test'] = {
+                        'autocorrelation_lag1': float(autocorr_1) if not np.isnan(autocorr_1) else 0.0,
+                        'ljung_box_statistic': float(lb_result['lb_stat'].iloc[0]),
+                        'ljung_box_p_value': float(lb_result['lb_pvalue'].iloc[0]),
+                        'is_serially_correlated': float(lb_result['lb_pvalue'].iloc[0]) < 0.05
+                    }
+                    
+                except Exception as e:
+                    logger.warning(f"Serial correlation test failed: {e}")
+            
+            # Multiple comparisons across different benchmarks
+            try:
+                all_benchmarks = benchmark_manager.get_all_benchmark_returns(
+                    overall_start, overall_end, list(window_returns.keys())
+                )
+                
+                benchmark_test_results = []
+                
+                for bench_name, bench_returns in all_benchmarks.items():
+                    if bench_name != benchmark_name and len(bench_returns) >= 20:
+                        # Collect all model returns
+                        all_model_returns = []
+                        for returns in window_returns.values():
+                            all_model_returns.extend(returns.tolist())
+                        
+                        if len(all_model_returns) >= 20:
+                            # Align lengths
+                            min_length = min(len(all_model_returns), len(bench_returns))
+                            aligned_model = np.array(all_model_returns[:min_length])
+                            aligned_bench = np.array(bench_returns.tolist()[:min_length])
+                            
+                            # Run Diebold-Mariano test
+                            try:
+                                dm_result = test_engine.diebold_mariano_test(
+                                    aligned_model, aligned_bench
+                                )
+                                benchmark_test_results.append({
+                                    'benchmark': bench_name,
+                                    'test_result': dm_result.to_dict()
+                                })
+                                
+                            except Exception as e:
+                                logger.warning(f"Diebold-Mariano test failed for {bench_name}: {e}")
+                
+                if benchmark_test_results:
+                    # Apply multiple testing correction
+                    test_results = [result['test_result'] for result in benchmark_test_results]
+                    multiple_test_result = test_engine.multiple_testing_correction(
+                        [TestResult(
+                            test_type=TestType.DIEBOLD_MARIANO,
+                            statistic=tr['statistic'],
+                            p_value=tr['p_value']
+                        ) for tr in test_results]
+                    )
+                    
+                    statistical_results['multiple_benchmark_tests'] = {
+                        'individual_tests': benchmark_test_results,
+                        'multiple_testing_correction': multiple_test_result.to_dict()
+                    }
+                
+            except Exception as e:
+                logger.warning(f"Multiple benchmark tests failed: {e}")
+            
+            # Summary statistics
+            statistical_results['summary'] = {
+                'total_statistical_tests': len([k for k in statistical_results.keys() if k != 'summary']),
+                'significant_tests': len([
+                    k for k, v in statistical_results.items() 
+                    if k != 'summary' and isinstance(v, dict) and v.get('is_significant', False)
+                ]),
+                'test_period': {
+                    'start': overall_start.isoformat(),
+                    'end': overall_end.isoformat()
+                },
+                'primary_benchmark': benchmark_name,
+                'total_validation_windows': len(validation_result.windows)
+            }
+            
+            logger.info(f"Performance statistical testing completed: {len(statistical_results)} test groups")
+            return statistical_results
+            
+        except ImportError as e:
+            logger.error(f"Statistical testing modules not available: {e}")
+            return {"error": "Statistical testing modules not available"}
+            
+        except Exception as e:
+            logger.error(f"Performance statistical testing failed: {e}")
+            return {"error": str(e)}
 
 
 # Utility functions

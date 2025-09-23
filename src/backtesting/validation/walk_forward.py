@@ -136,6 +136,11 @@ class ValidationResult:
     performance_summary: Optional[Dict[str, Any]] = None
     risk_metrics: Optional[Dict[str, Any]] = None
     
+    # Statistical testing results (to be filled by statistical testing module)
+    statistical_tests: Optional[Dict[str, Any]] = None
+    benchmark_comparisons: Optional[Dict[str, Any]] = None
+    significance_results: Optional[Dict[str, Any]] = None
+    
     def success_rate(self) -> float:
         """Calculate validation success rate."""
         if self.total_windows == 0:
@@ -496,11 +501,40 @@ class WalkForwardValidator:
         self,
         splitter: WalkForwardSplitter,
         symbols: List[str],
-        data_types: List[DataType] = None
+        data_types: List[DataType] = None,
+        enable_statistical_testing: bool = True
     ):
         self.splitter = splitter
         self.symbols = symbols
         self.data_types = data_types or [DataType.PRICE, DataType.VOLUME]
+        self.enable_statistical_testing = enable_statistical_testing
+        
+        # Initialize statistical testing components if enabled
+        self._statistical_engine = None
+        self._benchmark_manager = None
+        
+        if enable_statistical_testing:
+            try:
+                from .statistical_tests import StatisticalTestEngine, create_default_statistical_config
+                from .benchmarks import TaiwanBenchmarkManager, create_default_benchmark_config
+                
+                # Initialize statistical testing
+                stat_config = create_default_statistical_config()
+                self._statistical_engine = StatisticalTestEngine(stat_config)
+                
+                # Initialize benchmark manager
+                bench_config = create_default_benchmark_config()
+                self._benchmark_manager = TaiwanBenchmarkManager(
+                    bench_config, 
+                    self.splitter.temporal_store, 
+                    self.splitter.pit_engine
+                )
+                
+                logger.info("Statistical testing enabled for walk-forward validation")
+                
+            except ImportError as e:
+                logger.warning(f"Statistical testing modules not available: {e}")
+                self.enable_statistical_testing = False
         
     def run_validation(
         self,
@@ -575,6 +609,181 @@ class WalkForwardValidator:
         except Exception as e:
             logger.error(f"Walk-forward validation failed: {e}")
             raise
+    
+    def run_statistical_tests(
+        self,
+        validation_result: ValidationResult,
+        model_returns: Dict[str, pd.Series],
+        benchmark_name: str = "TAIEX"
+    ) -> ValidationResult:
+        """
+        Run statistical significance tests on validation results.
+        
+        Args:
+            validation_result: Completed validation result
+            model_returns: Dictionary mapping window_id to model returns
+            benchmark_name: Benchmark to compare against
+            
+        Returns:
+            Updated validation result with statistical tests
+        """
+        if not self.enable_statistical_testing:
+            logger.warning("Statistical testing is disabled")
+            return validation_result
+        
+        if not self._statistical_engine or not self._benchmark_manager:
+            logger.error("Statistical testing components not initialized")
+            return validation_result
+        
+        logger.info(f"Running statistical tests against {benchmark_name} benchmark")
+        
+        try:
+            # Get benchmark returns for the validation period
+            overall_start = min(window.test_start for window in validation_result.windows)
+            overall_end = max(window.test_end for window in validation_result.windows)
+            
+            benchmark_returns = self._benchmark_manager.get_benchmark_returns(
+                benchmark_name, overall_start, overall_end, self.symbols
+            )
+            
+            # Run statistical tests
+            statistical_tests = {}
+            benchmark_comparisons = {}
+            significance_results = {}
+            
+            # Collect all model returns
+            all_model_returns = []
+            all_benchmark_returns = []
+            
+            for window_id, returns in model_returns.items():
+                if len(returns) > 0:
+                    all_model_returns.extend(returns.tolist())
+                    
+                    # Get corresponding benchmark returns
+                    window = validation_result.get_window_by_id(window_id)
+                    if window:
+                        window_benchmark = benchmark_returns[
+                            benchmark_returns.index >= pd.Timestamp(window.test_start)
+                        ][
+                            benchmark_returns.index <= pd.Timestamp(window.test_end)
+                        ]
+                        all_benchmark_returns.extend(window_benchmark.tolist())
+            
+            if len(all_model_returns) > 0 and len(all_benchmark_returns) > 0:
+                # Ensure same length
+                min_length = min(len(all_model_returns), len(all_benchmark_returns))
+                all_model_returns = all_model_returns[:min_length]
+                all_benchmark_returns = all_benchmark_returns[:min_length]
+                
+                # Run Diebold-Mariano test
+                if min_length >= 10:
+                    try:
+                        dm_result = self._statistical_engine.diebold_mariano_test(
+                            np.array(all_model_returns),
+                            np.array(all_benchmark_returns)
+                        )
+                        statistical_tests['diebold_mariano'] = dm_result.to_dict()
+                        
+                    except Exception as e:
+                        logger.warning(f"Diebold-Mariano test failed: {e}")
+                
+                # Run Hansen SPA test (if we have multiple model variants)
+                if len(model_returns) > 1:
+                    try:
+                        model_series_list = [returns for returns in model_returns.values() if len(returns) > 0]
+                        if len(model_series_list) > 1:
+                            spa_result = self._statistical_engine.hansen_spa_test(
+                                np.array(all_benchmark_returns),
+                                [np.array(model_series.tolist()) for model_series in model_series_list]
+                            )
+                            statistical_tests['hansen_spa'] = spa_result.to_dict()
+                            
+                    except Exception as e:
+                        logger.warning(f"Hansen SPA test failed: {e}")
+                
+                # Run White Reality Check
+                if len(model_returns) > 1:
+                    try:
+                        wrc_result = self._statistical_engine.white_reality_check(
+                            np.array(all_benchmark_returns),
+                            [np.array(model_series.tolist()) for model_series in model_returns.values() if len(model_series) > 0]
+                        )
+                        statistical_tests['white_reality_check'] = wrc_result.to_dict()
+                        
+                    except Exception as e:
+                        logger.warning(f"White Reality Check failed: {e}")
+                
+                # Calculate bootstrap confidence intervals for key metrics
+                try:
+                    from .statistical_tests import sharpe_ratio_statistic, information_ratio_statistic
+                    
+                    # Sharpe ratio CI
+                    sharpe_ci = self._statistical_engine.bootstrap_confidence_interval(
+                        np.array(all_model_returns),
+                        lambda x: sharpe_ratio_statistic(x, 0.01)
+                    )
+                    statistical_tests['sharpe_ratio_ci'] = sharpe_ci.to_dict()
+                    
+                    # Information ratio CI
+                    ir_ci = self._statistical_engine.bootstrap_confidence_interval(
+                        np.array(all_model_returns) - np.array(all_benchmark_returns),
+                        lambda x: np.mean(x) / np.std(x) * np.sqrt(252) if np.std(x) > 0 else 0
+                    )
+                    statistical_tests['information_ratio_ci'] = ir_ci.to_dict()
+                    
+                except Exception as e:
+                    logger.warning(f"Bootstrap confidence intervals failed: {e}")
+            
+            # Get additional benchmark comparisons
+            try:
+                all_benchmarks = self._benchmark_manager.get_all_benchmark_returns(
+                    overall_start, overall_end, self.symbols
+                )
+                
+                for bench_name, bench_returns in all_benchmarks.items():
+                    if bench_name != benchmark_name and len(bench_returns) > 0:
+                        # Calculate correlation and other comparison metrics
+                        if len(all_model_returns) > 0:
+                            aligned_bench = bench_returns[:len(all_model_returns)]
+                            if len(aligned_bench) > 1:
+                                correlation = np.corrcoef(all_model_returns, aligned_bench)[0, 1]
+                                benchmark_comparisons[bench_name] = {
+                                    'correlation': float(correlation) if not np.isnan(correlation) else 0.0,
+                                    'mean_return': float(np.mean(aligned_bench)),
+                                    'volatility': float(np.std(aligned_bench))
+                                }
+                
+            except Exception as e:
+                logger.warning(f"Benchmark comparisons failed: {e}")
+            
+            # Summarize significance results
+            significance_results = {
+                'num_significant_tests': sum(
+                    1 for test_result in statistical_tests.values()
+                    if isinstance(test_result, dict) and test_result.get('is_significant', False)
+                ),
+                'total_tests': len(statistical_tests),
+                'primary_benchmark': benchmark_name,
+                'test_period': {
+                    'start': overall_start.isoformat(),
+                    'end': overall_end.isoformat(),
+                    'total_observations': len(all_model_returns)
+                }
+            }
+            
+            # Update validation result
+            validation_result.statistical_tests = statistical_tests
+            validation_result.benchmark_comparisons = benchmark_comparisons
+            validation_result.significance_results = significance_results
+            
+            logger.info(f"Statistical testing completed: {len(statistical_tests)} tests run")
+            
+        except Exception as e:
+            logger.error(f"Statistical testing failed: {e}")
+            # Don't fail the entire validation, just log the error
+            validation_result.statistical_tests = {"error": str(e)}
+        
+        return validation_result
 
 
 # Example usage and testing functions

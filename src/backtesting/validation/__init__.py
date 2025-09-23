@@ -29,6 +29,22 @@ from .regime_detection import (
     StabilityTester,
     StabilityTestResult
 )
+from .statistical_tests import (
+    StatisticalTestEngine,
+    StatisticalTestConfig,
+    TestResult,
+    TestType,
+    MultipleTestResult,
+    create_default_statistical_config
+)
+from .benchmarks import (
+    TaiwanBenchmarkManager,
+    BenchmarkDefinition,
+    BenchmarkCalculator,
+    BenchmarkConfig,
+    BenchmarkCategory,
+    create_default_benchmark_config
+)
 
 __all__ = [
     'WalkForwardSplitter',
@@ -46,5 +62,17 @@ __all__ = [
     'MarketRegime',
     'RegimeState',
     'StabilityTester',
-    'StabilityTestResult'
+    'StabilityTestResult',
+    'StatisticalTestEngine',
+    'StatisticalTestConfig',
+    'TestResult',
+    'TestType',
+    'MultipleTestResult',
+    'create_default_statistical_config',
+    'TaiwanBenchmarkManager',
+    'BenchmarkDefinition',
+    'BenchmarkCalculator',
+    'BenchmarkConfig',
+    'BenchmarkCategory',
+    'create_default_benchmark_config'
 ]
