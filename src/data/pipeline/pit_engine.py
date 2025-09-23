@@ -53,6 +53,8 @@ class PITQuery:
     bias_check: BiasCheckLevel = BiasCheckLevel.STRICT
     max_lag_days: Optional[int] = None
     include_metadata: bool = True
+    start_date: Optional[date] = None
+    end_date: Optional[date] = None
     
     def __post_init__(self):
         """Validate query parameters."""
@@ -60,6 +62,8 @@ class PITQuery:
             raise ValueError("At least one symbol required")
         if not self.data_types:
             raise ValueError("At least one data type required")
+        if self.start_date and self.end_date and self.start_date > self.end_date:
+            raise ValueError("Start date must be before or equal to end date")
 
 
 @dataclass
@@ -497,6 +501,62 @@ class PointInTimeEngine:
         if self.cache:
             self.cache.clear()
             logger.info("Query cache cleared")
+    
+    def query(self, query: PITQuery, bias_check_level: Optional[BiasCheckLevel] = None) -> Dict[str, List[TemporalValue]]:
+        """
+        Execute query and return data in format expected by validation framework.
+        
+        Args:
+            query: PITQuery specification
+            bias_check_level: Override bias check level
+            
+        Returns:
+            Dictionary mapping symbols to lists of temporal values
+        """
+        if bias_check_level:
+            query.bias_check = bias_check_level
+        
+        result = self.execute_query(query)
+        
+        # Convert result format for validation framework
+        converted_result = {}
+        for symbol, symbol_data in result.data.items():
+            converted_result[symbol] = []
+            for data_type, temporal_value in symbol_data.items():
+                if temporal_value:
+                    converted_result[symbol].append(temporal_value)
+        
+        return converted_result
+    
+    def check_data_availability(self, query: PITQuery) -> bool:
+        """
+        Check if sufficient data is available for the query.
+        
+        Args:
+            query: PITQuery specification
+            
+        Returns:
+            True if data is available for the query
+        """
+        try:
+            # Execute query to check availability
+            result = self.execute_query(query)
+            
+            # Check if we have data for all requested symbols and data types
+            for symbol in query.symbols:
+                if symbol not in result.data:
+                    return False
+                
+                symbol_data = result.data[symbol]
+                for data_type in query.data_types:
+                    if data_type not in symbol_data or symbol_data[data_type] is None:
+                        return False
+            
+            return True
+            
+        except Exception as e:
+            logger.debug(f"Data availability check failed: {e}")
+            return False
 
 
 def create_temporal_store(connection_params: Optional[Dict[str, Any]] = None,

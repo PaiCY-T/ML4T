@@ -77,39 +77,67 @@ class TaiwanTradingCalendar:
 @dataclass
 class TaiwanSettlement:
     """Taiwan market settlement information with T+2 handling."""
-    trade_date: date
-    settlement_date: date
+    trade_date: Optional[date] = None
+    settlement_date: Optional[date] = None
     is_regular_settlement: bool = True
     special_settlement_reason: Optional[str] = None
     
-    def __post_init__(self):
-        """Validate settlement dates."""
-        if self.settlement_date <= self.trade_date:
+    def __init__(self, trade_date: Optional[date] = None, settlement_date: Optional[date] = None, 
+                 is_regular_settlement: bool = True, special_settlement_reason: Optional[str] = None):
+        self.trade_date = trade_date
+        self.settlement_date = settlement_date
+        self.is_regular_settlement = is_regular_settlement
+        self.special_settlement_reason = special_settlement_reason
+        
+        if self.trade_date and self.settlement_date and self.settlement_date <= self.trade_date:
             raise ValueError(f"Settlement date {self.settlement_date} must be after trade date {self.trade_date}")
     
     @property
     def settlement_lag_days(self) -> int:
         """Calculate settlement lag in calendar days."""
+        if not self.trade_date or not self.settlement_date:
+            return 2  # Default T+2
         return (self.settlement_date - self.trade_date).days
+    
+    def calculate_settlement_date(self, trade_date: date, settlement_lag: int = 2) -> date:
+        """Calculate settlement date for a given trade date."""
+        # Simple T+2 calculation adjusting for weekends
+        settlement_date = trade_date + timedelta(days=settlement_lag)
+        
+        # Skip weekends (simplified)
+        while settlement_date.weekday() >= 5:  # Saturday = 5, Sunday = 6
+            settlement_date += timedelta(days=1)
+            
+        return settlement_date
+    
+    def adjust_for_settlement_lag(self, trade_date: date, lag_days: int = 2) -> date:
+        """Adjust a trade date for settlement lag."""
+        return self.calculate_settlement_date(trade_date, lag_days)
     
     @classmethod
     def calculate_t2_settlement(cls, trade_date: date, 
-                               trading_calendar: Dict[date, TaiwanTradingCalendar]) -> 'TaiwanSettlement':
+                               trading_calendar: Optional[Dict[date, TaiwanTradingCalendar]] = None) -> 'TaiwanSettlement':
         """Calculate T+2 settlement date considering Taiwan holidays."""
-        current_date = trade_date
-        business_days_added = 0
-        
-        while business_days_added < 2:
-            current_date += timedelta(days=1)
+        if trading_calendar is None:
+            # Simplified calculation without calendar
+            settlement_date = trade_date + timedelta(days=2)
+            while settlement_date.weekday() >= 5:
+                settlement_date += timedelta(days=1)
+        else:
+            current_date = trade_date
+            business_days_added = 0
             
-            # Check if it's a trading day
-            calendar_entry = trading_calendar.get(current_date)
-            if calendar_entry and calendar_entry.is_trading_day:
-                business_days_added += 1
+            while business_days_added < 2:
+                current_date += timedelta(days=1)
+                
+                # Check if it's a trading day
+                calendar_entry = trading_calendar.get(current_date)
+                if calendar_entry and calendar_entry.is_trading_day:
+                    business_days_added += 1
         
         return cls(
             trade_date=trade_date,
-            settlement_date=current_date,
+            settlement_date=current_date if trading_calendar else settlement_date,
             is_regular_settlement=True
         )
 
@@ -345,39 +373,137 @@ class TaiwanMarketDataValidator:
         return issues
 
 
-def create_taiwan_trading_calendar(year: int) -> Dict[date, TaiwanTradingCalendar]:
-    """Create Taiwan trading calendar for a given year."""
-    calendar = {}
+def create_taiwan_trading_calendar(start_year: int = None, end_year: int = None) -> 'TaiwanMarketCalendar':
+    """Create Taiwan trading calendar for a date range."""
+    if start_year is None:
+        start_year = date.today().year - 1
+    if end_year is None:
+        end_year = date.today().year + 1
     
-    # This is a simplified implementation
-    # Real implementation would fetch from Taiwan Stock Exchange
-    start_date = date(year, 1, 1)
-    end_date = date(year, 12, 31)
+    return TaiwanMarketCalendar(start_year, end_year)
+
+
+class TaiwanMarketCalendar:
+    """Comprehensive Taiwan market trading calendar."""
     
-    current_date = start_date
-    while current_date <= end_date:
-        # Simplified: weekdays are trading days
-        is_trading = current_date.weekday() < 5
+    def __init__(self, start_year: int, end_year: int):
+        self.start_year = start_year
+        self.end_year = end_year
+        self._calendar_cache = {}
+        self._initialize_calendar()
+    
+    def _initialize_calendar(self):
+        """Initialize the trading calendar."""
+        for year in range(self.start_year, self.end_year + 1):
+            self._calendar_cache.update(self._create_year_calendar(year))
+    
+    def _create_year_calendar(self, year: int) -> Dict[date, TaiwanTradingCalendar]:
+        """Create Taiwan trading calendar for a given year."""
+        calendar = {}
         
-        # Add known holidays (simplified list)
-        taiwan_holidays = {
-            date(year, 1, 1),   # New Year's Day
-            date(year, 10, 10), # National Day
-            # Add more holidays as needed
+        # This is a simplified implementation
+        # Real implementation would fetch from Taiwan Stock Exchange
+        start_date = date(year, 1, 1)
+        end_date = date(year, 12, 31)
+        
+        # Get Taiwan holidays for the year
+        taiwan_holidays = self._get_taiwan_holidays(year)
+        
+        current_date = start_date
+        while current_date <= end_date:
+            # Simplified: weekdays are trading days
+            is_trading = current_date.weekday() < 5
+            
+            # Check for holidays
+            if current_date in taiwan_holidays:
+                is_trading = False
+                
+            calendar[current_date] = TaiwanTradingCalendar(
+                date=current_date,
+                is_trading_day=is_trading,
+                market_session=MarketSession.MORNING if is_trading else MarketSession.CLOSED,
+                notes=taiwan_holidays.get(current_date, '')
+            )
+            
+            current_date += timedelta(days=1)
+        
+        return calendar
+    
+    def _get_taiwan_holidays(self, year: int) -> Dict[date, str]:
+        """Get Taiwan holidays for a given year."""
+        # Taiwan national holidays (simplified list)
+        holidays = {
+            date(year, 1, 1): "New Year's Day",
+            date(year, 2, 28): "Peace Memorial Day",
+            date(year, 4, 4): "Children's Day",
+            date(year, 4, 5): "Tomb Sweeping Day",
+            date(year, 5, 1): "Labor Day",
+            date(year, 10, 10): "National Day",
         }
         
-        if current_date in taiwan_holidays:
-            is_trading = False
-            
-        calendar[current_date] = TaiwanTradingCalendar(
-            date=current_date,
-            is_trading_day=is_trading,
-            market_session=MarketSession.MORNING if is_trading else MarketSession.CLOSED
-        )
+        # Add Lunar New Year (approximate dates - real implementation would calculate)
+        # This is a simplified approximation
+        lunar_new_year_dates = {
+            2023: [(1, 21), (1, 22), (1, 23), (1, 24), (1, 25), (1, 26), (1, 27)],
+            2024: [(2, 10), (2, 11), (2, 12), (2, 13), (2, 14)],
+            2025: [(1, 29), (1, 30), (1, 31), (2, 1), (2, 2)],
+            2026: [(2, 17), (2, 18), (2, 19), (2, 20), (2, 21)],
+        }
         
-        current_date += timedelta(days=1)
+        if year in lunar_new_year_dates:
+            for month, day in lunar_new_year_dates[year]:
+                holidays[date(year, month, day)] = "Lunar New Year Holiday"
+        
+        return holidays
     
-    return calendar
+    def is_trading_day(self, check_date: date) -> bool:
+        """Check if a date is a trading day."""
+        if check_date in self._calendar_cache:
+            return self._calendar_cache[check_date].is_trading_day
+        
+        # If not in cache, make a simple determination
+        return check_date.weekday() < 5  # Monday = 0, Friday = 4
+    
+    def get_trading_session(self, check_date: date) -> MarketSession:
+        """Get trading session for a date."""
+        if check_date in self._calendar_cache:
+            return self._calendar_cache[check_date].market_session
+        
+        return MarketSession.MORNING if self.is_trading_day(check_date) else MarketSession.CLOSED
+    
+    def get_next_trading_day(self, current_date: date) -> date:
+        """Get the next trading day after the given date."""
+        next_date = current_date + timedelta(days=1)
+        while not self.is_trading_day(next_date):
+            next_date += timedelta(days=1)
+        return next_date
+    
+    def get_previous_trading_day(self, current_date: date) -> date:
+        """Get the previous trading day before the given date."""
+        prev_date = current_date - timedelta(days=1)
+        while not self.is_trading_day(prev_date):
+            prev_date -= timedelta(days=1)
+        return prev_date
+    
+    def count_trading_days(self, start_date: date, end_date: date) -> int:
+        """Count trading days between two dates (inclusive)."""
+        count = 0
+        current = start_date
+        while current <= end_date:
+            if self.is_trading_day(current):
+                count += 1
+            current += timedelta(days=1)
+        return count
+    
+    def get_trading_days_in_range(self, start_date: date, end_date: date) -> List[date]:
+        """Get all trading days in a date range."""
+        trading_days = []
+        current = start_date
+        while current <= end_date:
+            if self.is_trading_day(current):
+                trading_days.append(current)
+            current += timedelta(days=1)
+        return trading_days
 
 
 def get_taiwan_market_timezone() -> str:
