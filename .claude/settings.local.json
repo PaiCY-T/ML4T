@@ -9,7 +9,10 @@
       "Read(//mnt/c/Users/jnpi/taiwan-quant-trading-clean/src/data/core/**)",
       "Read(//mnt/c/Users/jnpi/taiwan-quant-trading-clean/ML4T/factors/**)",
       "mcp__zen__thinkdeep",
-      "Bash(git checkout:*)"
+      "Bash(git checkout:*)",
+      "Bash(git submodule:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)"
     ],
     "deny": [],
     "ask": []
