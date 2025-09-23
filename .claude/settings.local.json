@@ -8,7 +8,8 @@
       "Read(//mnt/c/Users/jnpi/taiwan-quant-trading-clean/trading/broker_integration/**)",
       "Read(//mnt/c/Users/jnpi/taiwan-quant-trading-clean/src/data/core/**)",
       "Read(//mnt/c/Users/jnpi/taiwan-quant-trading-clean/ML4T/factors/**)",
-      "mcp__zen__thinkdeep"
+      "mcp__zen__thinkdeep",
+      "Bash(git checkout:*)"
     ],
     "deny": [],
     "ask": []
