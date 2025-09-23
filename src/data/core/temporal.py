@@ -11,6 +11,16 @@ from dataclasses import dataclass
 from enum import Enum
 import logging
 from abc import ABC, abstractmethod
+import json
+from decimal import Decimal
+
+try:
+    import psycopg2
+    from psycopg2.extras import RealDictCursor
+    from psycopg2.pool import SimpleConnectionPool
+    HAS_POSTGRES = True
+except ImportError:
+    HAS_POSTGRES = False
 
 logger = logging.getLogger(__name__)
 
@@ -274,3 +284,375 @@ def validate_temporal_order(values: List[TemporalValue]) -> bool:
         if values[i].as_of_date < values[i-1].as_of_date:
             return False
     return True
+
+
+class PostgreSQLTemporalStore(TemporalStore):
+    """PostgreSQL-backed temporal store for production use."""
+    
+    def __init__(self, connection_params: Dict[str, Any], pool_size: int = 10):
+        if not HAS_POSTGRES:
+            raise ImportError("psycopg2 is required for PostgreSQL temporal store")
+        
+        self.connection_params = connection_params
+        self.pool = SimpleConnectionPool(1, pool_size, **connection_params)
+        self._initialize_schema()
+        
+    def _initialize_schema(self):
+        """Initialize database schema for temporal data."""
+        schema_sql = """
+        -- Point-in-time data table
+        CREATE TABLE IF NOT EXISTS pit_data (
+            id BIGSERIAL PRIMARY KEY,
+            symbol VARCHAR(20) NOT NULL,
+            data_type VARCHAR(50) NOT NULL,
+            as_of_date DATE NOT NULL,
+            value_date DATE NOT NULL,
+            value_numeric DECIMAL(20,6),
+            value_text TEXT,
+            value_json JSONB,
+            metadata JSONB,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            version INTEGER DEFAULT 1,
+            -- Indexes for efficient querying
+            CONSTRAINT pit_data_unique UNIQUE (symbol, data_type, as_of_date, value_date, version)
+        );
+        
+        -- Indexes for performance
+        CREATE INDEX IF NOT EXISTS idx_pit_symbol_asof_type ON pit_data (symbol, as_of_date, data_type);
+        CREATE INDEX IF NOT EXISTS idx_pit_value_date ON pit_data (value_date);
+        CREATE INDEX IF NOT EXISTS idx_pit_data_type ON pit_data (data_type);
+        CREATE INDEX IF NOT EXISTS idx_pit_created_at ON pit_data (created_at);
+        CREATE INDEX IF NOT EXISTS idx_pit_metadata_gin ON pit_data USING GIN (metadata);
+        
+        -- Settlement calendar table
+        CREATE TABLE IF NOT EXISTS settlement_calendar (
+            trade_date DATE PRIMARY KEY,
+            settlement_date DATE NOT NULL,
+            is_trading_day BOOLEAN NOT NULL DEFAULT TRUE,
+            market_session VARCHAR(20) DEFAULT 'morning',
+            notes TEXT,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        );
+        
+        -- Index for settlement calendar
+        CREATE INDEX IF NOT EXISTS idx_settlement_date ON settlement_calendar (settlement_date);
+        """
+        
+        conn = self.pool.getconn()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute(schema_sql)
+                conn.commit()
+                logger.info("PostgreSQL temporal store schema initialized")
+        except Exception as e:
+            conn.rollback()
+            logger.error(f"Failed to initialize schema: {e}")
+            raise
+        finally:
+            self.pool.putconn(conn)
+    
+    def _serialize_value(self, value: Any) -> Tuple[Optional[Decimal], Optional[str], Optional[Dict]]:
+        """Serialize value into appropriate database columns."""
+        if isinstance(value, (int, float, Decimal)):
+            return Decimal(str(value)), None, None
+        elif isinstance(value, str):
+            return None, value, None
+        elif isinstance(value, (dict, list)):
+            return None, None, value
+        else:
+            # Convert to JSON for complex types
+            return None, None, {"type": type(value).__name__, "value": str(value)}
+    
+    def _deserialize_value(self, numeric_val: Optional[Decimal], 
+                          text_val: Optional[str], 
+                          json_val: Optional[Dict]) -> Any:
+        """Deserialize value from database columns."""
+        if numeric_val is not None:
+            return numeric_val
+        elif text_val is not None:
+            return text_val
+        elif json_val is not None:
+            if isinstance(json_val, dict) and "type" in json_val and "value" in json_val:
+                # Handle serialized complex types
+                return json_val["value"]
+            return json_val
+        else:
+            return None
+    
+    def store(self, value: TemporalValue) -> None:
+        """Store a temporal value in PostgreSQL."""
+        conn = self.pool.getconn()
+        try:
+            numeric_val, text_val, json_val = self._serialize_value(value.value)
+            
+            with conn.cursor() as cursor:
+                # Use ON CONFLICT to handle duplicates (update version)
+                sql = """
+                INSERT INTO pit_data (
+                    symbol, data_type, as_of_date, value_date,
+                    value_numeric, value_text, value_json, metadata, created_at, version
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (symbol, data_type, as_of_date, value_date, version)
+                DO UPDATE SET
+                    value_numeric = EXCLUDED.value_numeric,
+                    value_text = EXCLUDED.value_text,
+                    value_json = EXCLUDED.value_json,
+                    metadata = EXCLUDED.metadata,
+                    created_at = EXCLUDED.created_at
+                """
+                
+                cursor.execute(sql, (
+                    value.symbol,
+                    value.data_type.value,
+                    value.as_of_date,
+                    value.value_date,
+                    numeric_val,
+                    text_val,
+                    json.dumps(json_val) if json_val else None,
+                    json.dumps(value.metadata) if value.metadata else None,
+                    value.created_at or datetime.utcnow(),
+                    value.version
+                ))
+                
+                conn.commit()
+                logger.debug(f"Stored temporal value: {value.symbol} {value.data_type} "
+                           f"as_of={value.as_of_date} value_date={value.value_date}")
+                
+        except Exception as e:
+            conn.rollback()
+            logger.error(f"Failed to store temporal value: {e}")
+            raise
+        finally:
+            self.pool.putconn(conn)
+    
+    def get_point_in_time(self, symbol: str, as_of_date: date, 
+                         data_type: DataType) -> Optional[TemporalValue]:
+        """Get the most recent value as of a specific date."""
+        conn = self.pool.getconn()
+        try:
+            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                sql = """
+                SELECT * FROM pit_data
+                WHERE symbol = %s 
+                AND data_type = %s
+                AND as_of_date <= %s
+                ORDER BY as_of_date DESC, version DESC
+                LIMIT 1
+                """
+                
+                cursor.execute(sql, (symbol, data_type.value, as_of_date))
+                row = cursor.fetchone()
+                
+                if row:
+                    value = self._deserialize_value(
+                        row['value_numeric'], 
+                        row['value_text'], 
+                        json.loads(row['value_json']) if row['value_json'] else None
+                    )
+                    
+                    metadata = json.loads(row['metadata']) if row['metadata'] else None
+                    
+                    return TemporalValue(
+                        value=value,
+                        as_of_date=row['as_of_date'],
+                        value_date=row['value_date'],
+                        data_type=DataType(row['data_type']),
+                        symbol=row['symbol'],
+                        metadata=metadata,
+                        created_at=row['created_at'],
+                        version=row['version']
+                    )
+                
+                return None
+                
+        except Exception as e:
+            logger.error(f"Failed to get point-in-time value: {e}")
+            raise
+        finally:
+            self.pool.putconn(conn)
+    
+    def get_range(self, symbol: str, start_date: date, end_date: date,
+                 data_type: DataType) -> List[TemporalValue]:
+        """Get all values in a date range."""
+        conn = self.pool.getconn()
+        try:
+            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                sql = """
+                SELECT * FROM pit_data
+                WHERE symbol = %s 
+                AND data_type = %s
+                AND value_date >= %s
+                AND value_date <= %s
+                ORDER BY value_date ASC, as_of_date DESC, version DESC
+                """
+                
+                cursor.execute(sql, (symbol, data_type.value, start_date, end_date))
+                rows = cursor.fetchall()
+                
+                values = []
+                for row in rows:
+                    value = self._deserialize_value(
+                        row['value_numeric'], 
+                        row['value_text'], 
+                        json.loads(row['value_json']) if row['value_json'] else None
+                    )
+                    
+                    metadata = json.loads(row['metadata']) if row['metadata'] else None
+                    
+                    values.append(TemporalValue(
+                        value=value,
+                        as_of_date=row['as_of_date'],
+                        value_date=row['value_date'],
+                        data_type=DataType(row['data_type']),
+                        symbol=row['symbol'],
+                        metadata=metadata,
+                        created_at=row['created_at'],
+                        version=row['version']
+                    ))
+                
+                return values
+                
+        except Exception as e:
+            logger.error(f"Failed to get range values: {e}")
+            raise
+        finally:
+            self.pool.putconn(conn)
+    
+    def validate_no_lookahead(self, symbol: str, query_date: date,
+                             data_date: date) -> bool:
+        """Validate that no look-ahead bias exists."""
+        conn = self.pool.getconn()
+        try:
+            with conn.cursor() as cursor:
+                # Check if any data for the symbol on data_date was available before query_date
+                sql = """
+                SELECT COUNT(*) FROM pit_data
+                WHERE symbol = %s 
+                AND value_date = %s
+                AND as_of_date > %s
+                """
+                
+                cursor.execute(sql, (symbol, data_date, query_date))
+                count = cursor.fetchone()[0]
+                
+                if count > 0:
+                    logger.warning(f"Potential look-ahead bias: {count} records for {symbol} "
+                                 f"on {data_date} available after {query_date}")
+                    return False
+                
+                return True
+                
+        except Exception as e:
+            logger.error(f"Failed to validate look-ahead bias: {e}")
+            raise
+        finally:
+            self.pool.putconn(conn)
+    
+    def bulk_store(self, values: List[TemporalValue]) -> None:
+        """Efficiently store multiple temporal values."""
+        if not values:
+            return
+            
+        conn = self.pool.getconn()
+        try:
+            with conn.cursor() as cursor:
+                # Prepare data for bulk insert
+                data = []
+                for value in values:
+                    numeric_val, text_val, json_val = self._serialize_value(value.value)
+                    data.append((
+                        value.symbol,
+                        value.data_type.value,
+                        value.as_of_date,
+                        value.value_date,
+                        numeric_val,
+                        text_val,
+                        json.dumps(json_val) if json_val else None,
+                        json.dumps(value.metadata) if value.metadata else None,
+                        value.created_at or datetime.utcnow(),
+                        value.version
+                    ))
+                
+                # Use COPY for maximum performance on large datasets
+                sql = """
+                INSERT INTO pit_data (
+                    symbol, data_type, as_of_date, value_date,
+                    value_numeric, value_text, value_json, metadata, created_at, version
+                ) VALUES %s
+                ON CONFLICT (symbol, data_type, as_of_date, value_date, version)
+                DO UPDATE SET
+                    value_numeric = EXCLUDED.value_numeric,
+                    value_text = EXCLUDED.value_text,
+                    value_json = EXCLUDED.value_json,
+                    metadata = EXCLUDED.metadata,
+                    created_at = EXCLUDED.created_at
+                """
+                
+                from psycopg2.extras import execute_values
+                execute_values(cursor, sql, data)
+                
+                conn.commit()
+                logger.info(f"Bulk stored {len(values)} temporal values")
+                
+        except Exception as e:
+            conn.rollback()
+            logger.error(f"Failed to bulk store temporal values: {e}")
+            raise
+        finally:
+            self.pool.putconn(conn)
+    
+    def get_statistics(self) -> Dict[str, Any]:
+        """Get database statistics for performance monitoring."""
+        conn = self.pool.getconn()
+        try:
+            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                # Get table statistics
+                cursor.execute("""
+                    SELECT 
+                        COUNT(*) as total_records,
+                        COUNT(DISTINCT symbol) as unique_symbols,
+                        COUNT(DISTINCT data_type) as unique_data_types,
+                        MIN(as_of_date) as earliest_as_of_date,
+                        MAX(as_of_date) as latest_as_of_date,
+                        MIN(value_date) as earliest_value_date,
+                        MAX(value_date) as latest_value_date
+                    FROM pit_data
+                """)
+                
+                stats = dict(cursor.fetchone())
+                
+                # Get data type distribution
+                cursor.execute("""
+                    SELECT data_type, COUNT(*) as count
+                    FROM pit_data
+                    GROUP BY data_type
+                    ORDER BY count DESC
+                """)
+                
+                stats['data_type_distribution'] = {
+                    row['data_type']: row['count'] 
+                    for row in cursor.fetchall()
+                }
+                
+                # Get table size
+                cursor.execute("""
+                    SELECT pg_size_pretty(pg_total_relation_size('pit_data')) as table_size
+                """)
+                
+                size_result = cursor.fetchone()
+                if size_result:
+                    stats['table_size'] = size_result['table_size']
+                
+                return stats
+                
+        except Exception as e:
+            logger.error(f"Failed to get statistics: {e}")
+            return {}
+        finally:
+            self.pool.putconn(conn)
+    
+    def close(self):
+        """Close database connection pool."""
+        if hasattr(self, 'pool') and self.pool:
+            self.pool.closeall()
+            logger.info("PostgreSQL temporal store connections closed")

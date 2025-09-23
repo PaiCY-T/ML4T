@@ -17,7 +17,7 @@ from collections import defaultdict
 
 from ..core.temporal import (
     TemporalValue, TemporalStore, DataType, TemporalDataManager,
-    calculate_data_lag, validate_temporal_order
+    PostgreSQLTemporalStore, calculate_data_lag, validate_temporal_order
 )
 from ..models.taiwan_market import (
     TaiwanSettlement, TaiwanTradingCalendar, TaiwanMarketDataValidator,
@@ -497,3 +497,147 @@ class PointInTimeEngine:
         if self.cache:
             self.cache.clear()
             logger.info("Query cache cleared")
+
+
+def create_temporal_store(connection_params: Optional[Dict[str, Any]] = None,
+                         store_type: str = "auto") -> TemporalStore:
+    """Factory function to create the appropriate temporal store.
+    
+    Args:
+        connection_params: Database connection parameters for PostgreSQL store
+        store_type: "auto", "postgresql", or "memory"
+    
+    Returns:
+        TemporalStore: Configured temporal store instance
+    """
+    if store_type == "auto":
+        # Auto-detect based on availability
+        if connection_params:
+            store_type = "postgresql"
+        else:
+            store_type = "memory"
+    
+    if store_type == "postgresql":
+        if not connection_params:
+            raise ValueError("PostgreSQL store requires connection_params")
+        return PostgreSQLTemporalStore(connection_params)
+    elif store_type == "memory":
+        from ..core.temporal import InMemoryTemporalStore
+        return InMemoryTemporalStore()
+    else:
+        raise ValueError(f"Unknown store type: {store_type}")
+
+
+class OptimizedPointInTimeEngine(PointInTimeEngine):
+    """Enhanced PIT engine with SQL-specific optimizations."""
+    
+    def __init__(self,
+                 store: TemporalStore,
+                 trading_calendar: Optional[Dict[date, TaiwanTradingCalendar]] = None,
+                 enable_cache: bool = True,
+                 max_workers: int = 4,
+                 bulk_threshold: int = 100):
+        super().__init__(store, trading_calendar, enable_cache, max_workers)
+        self.bulk_threshold = bulk_threshold
+        self._is_sql_store = isinstance(store, PostgreSQLTemporalStore)
+        
+    def execute_bulk_optimized_query(self, queries: List[PITQuery]) -> List[PITResult]:
+        """Execute multiple queries with SQL-level optimization."""
+        if not self._is_sql_store or len(queries) < self.bulk_threshold:
+            # Fall back to individual queries
+            return [self.execute_query(query) for query in queries]
+        
+        # SQL-specific bulk optimization
+        return self._execute_sql_bulk_queries(queries)
+    
+    def _execute_sql_bulk_queries(self, queries: List[PITQuery]) -> List[PITResult]:
+        """Execute bulk queries using SQL-specific optimizations."""
+        # Group queries by data types and date ranges for optimal SQL execution
+        grouped_queries = self._group_queries_for_sql(queries)
+        results = []
+        
+        for group in grouped_queries:
+            # Execute each group as a single SQL query
+            group_results = self._execute_sql_query_group(group)
+            results.extend(group_results)
+        
+        return results
+    
+    def _group_queries_for_sql(self, queries: List[PITQuery]) -> List[List[PITQuery]]:
+        """Group queries for optimal SQL execution."""
+        # Simple grouping by data types for now
+        # Could be enhanced with more sophisticated grouping logic
+        groups = {}
+        
+        for query in queries:
+            key = (tuple(sorted([dt.value for dt in query.data_types])), query.mode)
+            if key not in groups:
+                groups[key] = []
+            groups[key].append(query)
+        
+        return list(groups.values())
+    
+    def _execute_sql_query_group(self, queries: List[PITQuery]) -> List[PITResult]:
+        """Execute a group of similar queries using SQL bulk operations."""
+        # This is a simplified implementation
+        # Real implementation would generate optimized SQL for bulk retrieval
+        return [self.execute_query(query) for query in queries]
+    
+    def warm_cache_sql_optimized(self, symbols: List[str], 
+                                date_range: Tuple[date, date],
+                                data_types: List[DataType]):
+        """SQL-optimized cache warming using bulk queries."""
+        if not self._is_sql_store:
+            return super().warm_cache(symbols, date_range, data_types)
+        
+        logger.info(f"SQL-optimized cache warming for {len(symbols)} symbols")
+        
+        start_date, end_date = date_range
+        
+        # Generate single bulk query for all symbols/dates/types
+        bulk_query = PITQuery(
+            symbols=symbols,
+            as_of_date=end_date,  # Get all data up to end date
+            data_types=data_types,
+            mode=QueryMode.BULK,
+            bias_check=BiasCheckLevel.BASIC
+        )
+        
+        # Execute and let the SQL store handle bulk operations efficiently
+        result = self.execute_query(bulk_query)
+        
+        logger.info(f"Cache warming completed with {result.total_queries} queries")
+
+
+def create_optimized_pit_engine(connection_params: Optional[Dict[str, Any]] = None,
+                               store_type: str = "auto",
+                               enable_cache: bool = True,
+                               max_workers: int = 4) -> PointInTimeEngine:
+    """Factory function to create an optimized PIT engine.
+    
+    Args:
+        connection_params: Database connection parameters
+        store_type: Type of temporal store to use
+        enable_cache: Whether to enable query caching
+        max_workers: Maximum worker threads for parallel queries
+    
+    Returns:
+        PointInTimeEngine: Configured PIT engine instance
+    """
+    store = create_temporal_store(connection_params, store_type)
+    trading_calendar = create_taiwan_trading_calendar(2024)
+    
+    if isinstance(store, PostgreSQLTemporalStore):
+        return OptimizedPointInTimeEngine(
+            store=store,
+            trading_calendar=trading_calendar,
+            enable_cache=enable_cache,
+            max_workers=max_workers
+        )
+    else:
+        return PointInTimeEngine(
+            store=store,
+            trading_calendar=trading_calendar,
+            enable_cache=enable_cache,
+            max_workers=max_workers
+        )
