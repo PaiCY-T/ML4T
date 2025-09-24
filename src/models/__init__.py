@@ -9,6 +9,13 @@ real-time inference capabilities.
 from .lightgbm_alpha import LightGBMAlphaModel, ModelConfig
 from .feature_pipeline import FeatureProcessor, FeaturePipeline
 from .taiwan_market import TaiwanMarketModel, MarketAdaptations
+from .training_pipeline import (
+    TaiwanMarketTrainingPipeline, 
+    TrainingPipelineConfig, 
+    TrainingResult,
+    create_taiwan_training_config,
+    run_quick_training
+)
 
 __all__ = [
     'LightGBMAlphaModel',
@@ -16,5 +23,10 @@ __all__ = [
     'FeatureProcessor',
     'FeaturePipeline',
     'TaiwanMarketModel',
-    'MarketAdaptations'
+    'MarketAdaptations',
+    'TaiwanMarketTrainingPipeline',
+    'TrainingPipelineConfig',
+    'TrainingResult',
+    'create_taiwan_training_config',
+    'run_quick_training'
 ]

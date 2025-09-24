@@ -1,704 +1,631 @@
 """
-Training Pipeline for LightGBM Alpha Model
+Comprehensive Training Pipeline for LightGBM Alpha Model
 
-Comprehensive training pipeline with memory optimization, cross-validation,
-and Taiwan market integration for 2000-stock universe.
+This module integrates hyperparameter optimization, time-series cross-validation,
+and performance tracking into a unified training pipeline for Taiwan market models.
 """
 
-import gc
 import logging
+import pickle
+import json
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union, Any, Callable
-import warnings
 
-import joblib
 import numpy as np
 import pandas as pd
-from sklearn.model_selection import TimeSeriesSplit
+import lightgbm as lgb
+from sklearn.base import BaseEstimator
 
 from .lightgbm_alpha import LightGBMAlphaModel, ModelConfig
-from .feature_pipeline import FeaturePipeline, FeatureConfig
-from .taiwan_market import TaiwanMarketModel, MarketAdaptations
+from ..optimization.hyperopt import HyperparameterOptimizer, OptimizationConfig, create_taiwan_optimization_config
+from ..validation.timeseries_cv import TimeSeriesCrossValidator, create_taiwan_cv_config, TimeSeriesCVConfig
+from ..metrics.model_performance import ModelPerformanceTracker, calculate_model_metrics
+from ..backtesting.validation.walk_forward import WalkForwardSplitter, WalkForwardConfig, create_default_config
+from ..data.core.temporal import TemporalStore
+from ..data.pipeline.pit_engine import PointInTimeEngine
 
 logger = logging.getLogger(__name__)
 
 
 @dataclass
-class TrainingConfig:
-    """Configuration for model training pipeline."""
+class TrainingPipelineConfig:
+    """Configuration for the complete training pipeline."""
     
-    # Data parameters
-    train_start_date: str = '2020-01-01'
-    train_end_date: str = '2023-12-31'
-    validation_start_date: str = '2024-01-01'
-    validation_end_date: str = '2024-06-30'
+    # Model configuration
+    model_config: Optional[ModelConfig] = None
     
-    # Target parameters
-    target_horizon_days: int = 5
-    rebalance_frequency_days: int = 5
+    # Hyperparameter optimization configuration
+    optimization_config: Optional[OptimizationConfig] = None
+    enable_hyperopt: bool = True
+    hyperopt_trials: int = 50
+    hyperopt_timeout_hours: int = 4
     
-    # Cross-validation parameters
+    # Cross-validation configuration  
+    cv_config: Optional[TimeSeriesCVConfig] = None
+    enable_cv: bool = True
     cv_folds: int = 5
-    cv_gap_days: int = 2  # Gap between train/val to prevent leakage (T+2 settlement)
-    expanding_window: bool = True
     
-    # Memory optimization
-    chunk_size: int = 500  # Process stocks in chunks
-    memory_limit_gb: float = 12.0
-    cleanup_intermediate: bool = True
-    use_dask: bool = False  # Option to use Dask for larger datasets
+    # Walk-forward validation configuration
+    walkforward_config: Optional[WalkForwardConfig] = None
+    enable_walkforward: bool = True
     
-    # Model ensemble
-    ensemble_size: int = 1  # Number of models to train
-    bootstrap_samples: bool = False
+    # Performance tracking configuration
+    enable_performance_tracking: bool = True
+    track_feature_importance: bool = True
     
-    # Performance targets
-    min_ic_threshold: float = 0.05
-    target_sharpe: float = 2.0
-    max_training_hours: float = 6.0
+    # Taiwan market specific configuration
+    target_horizons: List[int] = field(default_factory=lambda: [5, 10, 20])  # Days
+    performance_targets: Dict[str, float] = field(default_factory=lambda: {
+        'ic_threshold': 0.05,
+        'sharpe_threshold': 2.0,
+        'max_drawdown_threshold': 0.15,
+        'hit_rate_threshold': 0.52
+    })
+    
+    # Training configuration
+    retrain_frequency_days: int = 30  # Monthly retraining
+    validation_split: float = 0.2
+    enable_early_stopping: bool = True
+    early_stopping_rounds: int = 50
+    
+    # Output configuration
+    save_models: bool = True
+    save_results: bool = True
+    output_dir: str = "models/training_results"
+    model_version: Optional[str] = None
 
 
-class TrainingPipeline:
+@dataclass
+class TrainingResult:
+    """Results from complete training pipeline."""
+    
+    # Training metadata
+    pipeline_id: str
+    timestamp: datetime
+    config: TrainingPipelineConfig
+    training_duration_seconds: float
+    
+    # Model results
+    best_model: Optional[LightGBMAlphaModel] = None
+    model_path: Optional[str] = None
+    
+    # Optimization results
+    optimization_result: Optional[Dict[str, Any]] = None
+    best_hyperparameters: Optional[Dict[str, Any]] = None
+    
+    # Cross-validation results
+    cv_results: Optional[Dict[str, Any]] = None
+    cv_scores: Dict[str, List[float]] = field(default_factory=dict)
+    
+    # Walk-forward validation results
+    walkforward_results: Optional[Dict[str, Any]] = None
+    
+    # Performance metrics
+    performance_snapshot: Optional[Dict[str, Any]] = None
+    performance_summary: Dict[str, float] = field(default_factory=dict)
+    
+    # Feature analysis
+    feature_importance: Optional[pd.DataFrame] = None
+    feature_stability: Optional[Dict[str, float]] = None
+    
+    # Success indicators
+    meets_performance_targets: bool = False
+    training_successful: bool = False
+    validation_passed: bool = False
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert result to dictionary for serialization."""
+        return {
+            'pipeline_id': self.pipeline_id,
+            'timestamp': self.timestamp.isoformat(),
+            'training_duration_seconds': self.training_duration_seconds,
+            'best_hyperparameters': self.best_hyperparameters,
+            'cv_scores': self.cv_scores,
+            'performance_summary': self.performance_summary,
+            'meets_performance_targets': self.meets_performance_targets,
+            'training_successful': self.training_successful,
+            'validation_passed': self.validation_passed,
+            'model_path': self.model_path
+        }
+
+
+class TaiwanMarketTrainingPipeline:
     """
-    Memory-optimized training pipeline for Taiwan market alpha model.
+    Comprehensive training pipeline for Taiwan market alpha models.
     
-    Handles the complete workflow from data loading to model training
-    with specific optimizations for 2000-stock universe.
+    This class orchestrates the complete training process including:
+    - Data preparation and validation
+    - Hyperparameter optimization
+    - Time-series cross-validation
+    - Walk-forward validation
+    - Performance tracking and monitoring
+    - Model serialization and deployment preparation
     """
     
     def __init__(
-        self, 
-        training_config: Optional[TrainingConfig] = None,
-        model_config: Optional[ModelConfig] = None,
-        feature_config: Optional[FeatureConfig] = None
-    ):
-        """Initialize training pipeline."""
-        self.training_config = training_config or TrainingConfig()
-        self.model_config = model_config or ModelConfig()
-        self.feature_config = feature_config or FeatureConfig()
-        
-        # Initialize components
-        self.feature_pipeline = FeaturePipeline(self.feature_config)
-        self.market_adaptations = MarketAdaptations()
-        
-        # Training state
-        self.trained_models: List[TaiwanMarketModel] = []
-        self.training_history: List[Dict[str, Any]] = []
-        self.validation_results: Dict[str, Any] = {}
-        
-        logger.info("TrainingPipeline initialized with memory optimization")
-    
-    def run_complete_training(
         self,
-        data_sources: Dict[str, Union[str, pd.DataFrame, Callable]],
-        output_dir: Optional[Union[str, Path]] = None
-    ) -> Dict[str, Any]:
+        config: Optional[TrainingPipelineConfig] = None,
+        temporal_store: Optional[TemporalStore] = None,
+        pit_engine: Optional[PointInTimeEngine] = None
+    ):
         """
-        Run complete training pipeline with memory optimization.
+        Initialize the training pipeline.
         
         Args:
-            data_sources: Dictionary with data sources/loaders
-                - 'price_data': Price/return data
-                - 'volume_data': Volume data
-                - 'fundamental_data': Optional fundamental data
-                - 'market_data': Additional market data
-            output_dir: Directory to save models and results
+            config: Training pipeline configuration
+            temporal_store: Temporal data store for walk-forward validation
+            pit_engine: Point-in-time engine for bias prevention
+        """
+        self.config = config or TrainingPipelineConfig()
+        self.temporal_store = temporal_store
+        self.pit_engine = pit_engine
+        
+        # Initialize components
+        self._initialize_configurations()
+        self._initialize_components()
+        
+        # Create output directory
+        output_path = Path(self.config.output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+        
+        logger.info(f"TaiwanMarketTrainingPipeline initialized")
+    
+    def _initialize_configurations(self) -> None:
+        """Initialize default configurations if not provided."""
+        
+        # Model configuration
+        if self.config.model_config is None:
+            self.config.model_config = ModelConfig()
+            self.config.model_config.target_horizons = self.config.target_horizons
+        
+        # Optimization configuration
+        if self.config.optimization_config is None and self.config.enable_hyperopt:
+            self.config.optimization_config = create_taiwan_optimization_config(
+                n_trials=self.config.hyperopt_trials,
+                timeout_seconds=self.config.hyperopt_timeout_hours * 3600
+            )
+        
+        # Cross-validation configuration
+        if self.config.cv_config is None and self.config.enable_cv:
+            self.config.cv_config = create_taiwan_cv_config(
+                n_splits=self.config.cv_folds
+            )
+        
+        # Walk-forward configuration
+        if self.config.walkforward_config is None and self.config.enable_walkforward:
+            self.config.walkforward_config = create_default_config(
+                train_weeks=104,  # 2 years
+                test_weeks=26,    # 6 months
+                rebalance_weeks=4  # Monthly
+            )
+    
+    def _initialize_components(self) -> None:
+        """Initialize pipeline components."""
+        
+        # Hyperparameter optimizer
+        if self.config.enable_hyperopt:
+            self.hyperopt_optimizer = HyperparameterOptimizer(
+                self.config.optimization_config
+            )
+        else:
+            self.hyperopt_optimizer = None
+        
+        # Cross-validator
+        if self.config.enable_cv:
+            self.cv_validator = TimeSeriesCrossValidator(
+                config=self.config.cv_config,
+                temporal_store=self.temporal_store,
+                pit_engine=self.pit_engine
+            )
+        else:
+            self.cv_validator = None
+        
+        # Walk-forward splitter
+        if self.config.enable_walkforward and self.temporal_store:
+            self.walkforward_splitter = WalkForwardSplitter(
+                config=self.config.walkforward_config,
+                temporal_store=self.temporal_store,
+                pit_engine=self.pit_engine
+            )
+        else:
+            self.walkforward_splitter = None
+        
+        # Performance tracker
+        if self.config.enable_performance_tracking:
+            model_id = f"lightgbm_alpha_{self.config.model_version or 'default'}"
+            self.performance_tracker = ModelPerformanceTracker(model_id)
+        else:
+            self.performance_tracker = None
+    
+    def train_model(
+        self,
+        X: pd.DataFrame,
+        y: pd.Series,
+        benchmark_returns: Optional[pd.Series] = None,
+        symbol_universe: Optional[List[str]] = None
+    ) -> TrainingResult:
+        """
+        Execute the complete training pipeline.
+        
+        Args:
+            X: Feature matrix with MultiIndex (date, symbol)
+            y: Target variable (forward returns)
+            benchmark_returns: Benchmark returns for comparison
+            symbol_universe: List of symbols in the universe
             
         Returns:
-            Training summary with performance metrics
+            Complete training results
         """
         start_time = datetime.now()
-        logger.info("Starting complete training pipeline")
+        pipeline_id = f"pipeline_{start_time.strftime('%Y%m%d_%H%M%S')}"
         
-        output_dir = Path(output_dir) if output_dir else Path('./models/output')
-        output_dir.mkdir(parents=True, exist_ok=True)
+        logger.info(f"Starting training pipeline {pipeline_id}")
+        logger.info(f"Training data: {len(X)} samples, {len(X.columns)} features")
+        
+        # Initialize result object
+        result = TrainingResult(
+            pipeline_id=pipeline_id,
+            timestamp=start_time,
+            config=self.config,
+            training_duration_seconds=0.0
+        )
         
         try:
-            # Step 1: Load and validate data
-            logger.info("Step 1: Loading and validating data")
-            train_data, val_data = self._load_and_validate_data(data_sources)
+            # Step 1: Data preparation and validation
+            logger.info("Step 1: Data preparation and validation")
+            X_clean, y_clean = self._prepare_and_validate_data(X, y)
             
-            # Step 2: Memory optimization check
-            memory_usage = self._estimate_memory_usage(train_data)
-            if memory_usage > self.training_config.memory_limit_gb:
-                logger.warning(f"Data may exceed memory limit ({memory_usage:.1f}GB > {self.training_config.memory_limit_gb}GB)")
-                train_data, val_data = self._optimize_data_memory(train_data, val_data)
+            if len(X_clean) == 0:
+                raise ValueError("No valid data after cleaning")
             
-            # Step 3: Feature engineering
-            logger.info("Step 3: Feature engineering and processing")
-            X_train, y_train = self._prepare_training_features(train_data)
-            X_val, y_val = self._prepare_validation_features(val_data)
+            # Step 2: Hyperparameter optimization (if enabled)
+            best_params = None
+            if self.config.enable_hyperopt and self.hyperopt_optimizer:
+                logger.info("Step 2: Hyperparameter optimization")
+                opt_result = self.hyperopt_optimizer.optimize(
+                    X_clean, y_clean,
+                    walk_forward_splitter=self.walkforward_splitter,
+                    base_model_config=self.config.model_config
+                )
+                
+                result.optimization_result = opt_result.to_dict()
+                result.best_hyperparameters = opt_result.best_params
+                best_params = opt_result.best_params
+                
+                logger.info(f"Optimization completed: best {self.config.optimization_config.primary_metric} = {opt_result.best_value:.6f}")
             
-            # Step 4: Cross-validation
-            logger.info("Step 4: Running cross-validation")
-            cv_results = self._run_cross_validation(X_train, y_train)
+            # Step 3: Model training with best parameters
+            logger.info("Step 3: Model training")
+            model = self._train_final_model(X_clean, y_clean, best_params)
+            result.best_model = model
             
-            # Step 5: Train final model(s)
-            logger.info("Step 5: Training final model ensemble")
-            final_models = self._train_model_ensemble(X_train, y_train, X_val, y_val)
+            # Step 4: Cross-validation (if enabled)
+            if self.config.enable_cv and self.cv_validator:
+                logger.info("Step 4: Cross-validation")
+                cv_results = self.cv_validator.cross_validate_model(
+                    model.model, X_clean, y_clean
+                )
+                
+                result.cv_results = cv_results
+                result.cv_scores = cv_results['scores']
+                
+                logger.info(f"CV completed: {cv_results['summary']['success_rate']:.1%} success rate")
             
-            # Step 6: Final validation
-            logger.info("Step 6: Final validation and performance analysis")
-            validation_results = self._final_validation(final_models, X_val, y_val)
+            # Step 5: Walk-forward validation (if enabled)
+            if self.config.enable_walkforward and self.walkforward_splitter:
+                logger.info("Step 5: Walk-forward validation")
+                
+                # This would be implemented with actual walk-forward testing
+                # For now, we'll skip this step or implement a simplified version
+                logger.info("Walk-forward validation: Implementation pending")
             
-            # Step 7: Save results
-            logger.info("Step 7: Saving models and results")
-            self._save_training_results(final_models, output_dir)
+            # Step 6: Performance evaluation
+            logger.info("Step 6: Performance evaluation")
+            predictions = model.predict(X_clean)
             
-            training_time = (datetime.now() - start_time).total_seconds() / 3600
+            if self.performance_tracker:
+                snapshot = self.performance_tracker.calculate_performance(
+                    pd.Series(predictions, index=y_clean.index),
+                    y_clean,
+                    benchmark_returns
+                )
+                result.performance_snapshot = snapshot.to_dict()
             
-            # Compile final results
-            final_results = {
-                'training_time_hours': training_time,
-                'models_trained': len(final_models),
-                'cv_results': cv_results,
-                'validation_results': validation_results,
-                'data_stats': self._get_data_statistics(train_data, val_data),
-                'memory_usage_gb': memory_usage,
-                'output_directory': str(output_dir)
-            }
+            # Calculate quick performance metrics
+            result.performance_summary = calculate_model_metrics(
+                pd.Series(predictions, index=y_clean.index),
+                y_clean,
+                benchmark_returns
+            )
             
-            logger.info(f"Training pipeline completed in {training_time:.2f} hours")
-            logger.info(f"Best validation IC: {validation_results.get('best_ic', 'N/A'):.4f}")
+            # Step 7: Feature importance analysis
+            if self.config.track_feature_importance:
+                logger.info("Step 7: Feature importance analysis")
+                result.feature_importance = model.get_feature_importance()
+                result.feature_stability = self._analyze_feature_stability(model)
             
-            return final_results
+            # Step 8: Validation checks
+            logger.info("Step 8: Final validation")
+            result.validation_passed = self._validate_model_performance(result)
+            result.meets_performance_targets = self._check_performance_targets(result)
+            result.training_successful = True
+            
+            # Step 9: Model saving (if enabled)
+            if self.config.save_models:
+                logger.info("Step 9: Model saving")
+                model_filename = f"{pipeline_id}_model.pkl"
+                model_path = Path(self.config.output_dir) / model_filename
+                model.save_model(model_path)
+                result.model_path = str(model_path)
+            
+            logger.info(f"Training pipeline completed successfully")
             
         except Exception as e:
-            logger.error(f"Training pipeline failed: {str(e)}")
+            logger.error(f"Training pipeline failed: {e}")
+            result.training_successful = False
             raise
+        
         finally:
-            # Cleanup memory
-            if self.training_config.cleanup_intermediate:
-                gc.collect()
+            # Calculate total training time
+            result.training_duration_seconds = (datetime.now() - start_time).total_seconds()
+            
+            # Save results if enabled
+            if self.config.save_results:
+                self._save_training_results(result)
+        
+        return result
     
-    def _load_and_validate_data(
+    def _prepare_and_validate_data(
         self, 
-        data_sources: Dict[str, Any]
-    ) -> Tuple[Dict[str, pd.DataFrame], Dict[str, pd.DataFrame]]:
-        """Load and validate data with memory optimization."""
-        logger.info("Loading data with memory optimization")
+        X: pd.DataFrame, 
+        y: pd.Series
+    ) -> Tuple[pd.DataFrame, pd.Series]:
+        """Prepare and validate training data."""
         
-        # Load training data
-        train_data = {}
-        val_data = {}
+        logger.info("Preparing and validating training data")
         
-        for data_type, source in data_sources.items():
-            if callable(source):
-                # Data loader function
-                full_data = source()
-            elif isinstance(source, str):
-                # File path
-                full_data = pd.read_parquet(source) if source.endswith('.parquet') else pd.read_csv(source)
-            else:
-                # DataFrame
-                full_data = source.copy()
-            
-            # Split into train/validation
-            train_mask = (
-                (full_data.index.get_level_values('date') >= self.training_config.train_start_date) &
-                (full_data.index.get_level_values('date') <= self.training_config.train_end_date)
-            )
-            val_mask = (
-                (full_data.index.get_level_values('date') >= self.training_config.validation_start_date) &
-                (full_data.index.get_level_values('date') <= self.training_config.validation_end_date)
-            )
-            
-            train_data[data_type] = full_data[train_mask]
-            val_data[data_type] = full_data[val_mask]
-            
-            logger.info(f"Loaded {data_type}: {len(train_data[data_type])} train, {len(val_data[data_type])} val samples")
+        # Ensure alignment
+        common_idx = X.index.intersection(y.index)
+        X_aligned = X.loc[common_idx]
+        y_aligned = y.loc[common_idx]
+        
+        logger.info(f"Data aligned: {len(common_idx)} common samples")
+        
+        # Remove NaN values
+        valid_mask = ~(X_aligned.isnull().any(axis=1) | y_aligned.isnull())
+        X_clean = X_aligned[valid_mask]
+        y_clean = y_aligned[valid_mask]
+        
+        logger.info(f"Data cleaned: {len(X_clean)} valid samples")
         
         # Validate data quality
-        self._validate_data_quality(train_data)
+        self._validate_data_quality(X_clean, y_clean)
         
-        return train_data, val_data
+        return X_clean, y_clean
     
-    def _validate_data_quality(self, data: Dict[str, pd.DataFrame]) -> None:
-        """Validate data quality and completeness."""
-        validation_issues = []
+    def _validate_data_quality(self, X: pd.DataFrame, y: pd.Series) -> None:
+        """Validate data quality and raise warnings."""
         
-        for data_type, df in data.items():
-            # Check for excessive missing values
-            missing_pct = df.isnull().sum().sum() / (df.shape[0] * df.shape[1])
-            if missing_pct > 0.3:
-                validation_issues.append(f"{data_type} has {missing_pct:.1%} missing values")
-            
-            # Check for data gaps
-            if 'date' in df.index.names:
-                date_range = pd.date_range(
-                    df.index.get_level_values('date').min(),
-                    df.index.get_level_values('date').max(),
-                    freq='D'
-                )
-                actual_dates = df.index.get_level_values('date').unique()
-                missing_dates = len(date_range) - len(actual_dates)
-                if missing_dates > len(date_range) * 0.1:  # More than 10% missing
-                    validation_issues.append(f"{data_type} missing {missing_dates} dates")
+        # Check minimum sample size
+        if len(X) < 1000:
+            logger.warning(f"Low sample size: {len(X)} < 1000")
         
-        if validation_issues:
-            logger.warning(f"Data quality issues found: {validation_issues}")
-        else:
-            logger.info("Data quality validation passed")
+        # Check feature completeness
+        missing_rate = X.isnull().sum() / len(X)
+        high_missing_features = missing_rate[missing_rate > 0.1].index.tolist()
+        if high_missing_features:
+            logger.warning(f"Features with >10% missing: {high_missing_features}")
+        
+        # Check target distribution
+        target_std = y.std()
+        if target_std < 0.001:
+            logger.warning(f"Low target variance: std = {target_std:.6f}")
+        
+        # Check for outliers in target
+        target_abs = y.abs()
+        outlier_threshold = target_abs.quantile(0.99)
+        outlier_rate = (target_abs > outlier_threshold).mean()
+        if outlier_rate > 0.05:
+            logger.warning(f"High outlier rate in target: {outlier_rate:.1%}")
     
-    def _estimate_memory_usage(self, data: Dict[str, pd.DataFrame]) -> float:
-        """Estimate total memory usage in GB."""
-        total_bytes = 0
-        for df in data.values():
-            total_bytes += df.memory_usage(deep=True).sum()
+    def _train_final_model(
+        self,
+        X: pd.DataFrame,
+        y: pd.Series,
+        best_params: Optional[Dict[str, Any]] = None
+    ) -> LightGBMAlphaModel:
+        """Train the final model with optimized parameters."""
         
-        return total_bytes / (1024**3)  # Convert to GB
-    
-    def _optimize_data_memory(
-        self, 
-        train_data: Dict[str, pd.DataFrame],
-        val_data: Dict[str, pd.DataFrame]
-    ) -> Tuple[Dict[str, pd.DataFrame], Dict[str, pd.DataFrame]]:
-        """Optimize data memory usage."""
-        logger.info("Optimizing data memory usage")
+        # Create model configuration
+        model_config = ModelConfig()
+        model_config.target_horizons = self.config.target_horizons
         
-        optimized_train = {}
-        optimized_val = {}
+        # Apply optimized parameters if available
+        if best_params:
+            model_config.base_params.update(best_params)
         
-        for data_type in train_data.keys():
-            # Convert to optimal dtypes
-            optimized_train[data_type] = self._optimize_dataframe_memory(train_data[data_type])
-            optimized_val[data_type] = self._optimize_dataframe_memory(val_data[data_type])
+        # Initialize and train model
+        model = LightGBMAlphaModel(model_config)
         
-        return optimized_train, optimized_val
-    
-    def _optimize_dataframe_memory(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Optimize single DataFrame memory usage."""
-        optimized_df = df.copy()
-        
-        for col in optimized_df.select_dtypes(include=['float64']).columns:
-            # Convert float64 to float32 if precision allows
-            if optimized_df[col].max() < np.finfo(np.float32).max and \
-               optimized_df[col].min() > np.finfo(np.float32).min:
-                optimized_df[col] = optimized_df[col].astype(np.float32)
-        
-        for col in optimized_df.select_dtypes(include=['int64']).columns:
-            # Convert int64 to smaller int types if possible
-            col_max = optimized_df[col].max()
-            col_min = optimized_df[col].min()
-            
-            if col_min >= np.iinfo(np.int32).min and col_max <= np.iinfo(np.int32).max:
-                optimized_df[col] = optimized_df[col].astype(np.int32)
-            elif col_min >= np.iinfo(np.int16).min and col_max <= np.iinfo(np.int16).max:
-                optimized_df[col] = optimized_df[col].astype(np.int16)
-        
-        return optimized_df
-    
-    def _prepare_training_features(self, train_data: Dict[str, pd.DataFrame]) -> Tuple[pd.DataFrame, pd.Series]:
-        """Prepare training features with memory optimization."""
-        logger.info("Preparing training features")
-        
-        # Calculate returns for target
-        price_data = train_data['price_data']
-        returns = self._calculate_forward_returns(price_data, self.training_config.target_horizon_days)
-        
-        # Fit feature pipeline
-        X_train = self.feature_pipeline.fit_transform(
-            train_data.get('price_data', pd.DataFrame()),
-            train_data.get('volume_data', pd.DataFrame()),
-            returns,
-            train_data.get('fundamental_data'),
-            train_data.get('market_data')
+        # Prepare training data
+        X_train, y_train = model.prepare_training_data(
+            features=X, 
+            returns=y.to_frame('returns'), 
+            target_horizon=self.config.target_horizons[0]
         )
         
-        # Align features and targets
-        common_idx = X_train.index.intersection(returns.index)
-        X_train = X_train.loc[common_idx]
-        y_train = returns.loc[common_idx]
+        # Train with validation split
+        if self.config.validation_split > 0:
+            split_idx = int(len(X_train) * (1 - self.config.validation_split))
+            X_val = X_train.iloc[split_idx:]
+            y_val = y_train.iloc[split_idx:]
+            X_train = X_train.iloc[:split_idx]
+            y_train = y_train.iloc[:split_idx]
+            
+            validation_data = (X_val, y_val)
+        else:
+            validation_data = None
         
-        logger.info(f"Training features prepared: {X_train.shape}")
-        
-        return X_train, y_train
-    
-    def _prepare_validation_features(self, val_data: Dict[str, pd.DataFrame]) -> Tuple[pd.DataFrame, pd.Series]:
-        """Prepare validation features using fitted pipeline."""
-        logger.info("Preparing validation features")
-        
-        # Calculate returns for target
-        price_data = val_data['price_data']
-        returns = self._calculate_forward_returns(price_data, self.training_config.target_horizon_days)
-        
-        # Transform features using fitted pipeline
-        X_val = self.feature_pipeline.transform(
-            val_data.get('price_data', pd.DataFrame()),
-            val_data.get('volume_data', pd.DataFrame()),
-            val_data.get('fundamental_data'),
-            val_data.get('market_data')
+        # Train the model
+        training_stats = model.train(
+            X_train, y_train,
+            validation_data=validation_data,
+            verbose=True
         )
         
-        # Align features and targets
-        common_idx = X_val.index.intersection(returns.index)
-        X_val = X_val.loc[common_idx]
-        y_val = returns.loc[common_idx]
+        logger.info(f"Model trained: {training_stats['training_time_seconds']:.1f}s")
         
-        logger.info(f"Validation features prepared: {X_val.shape}")
-        
-        return X_val, y_val
+        return model
     
-    def _calculate_forward_returns(self, price_data: pd.DataFrame, horizon: int) -> pd.Series:
-        """Calculate forward returns with Taiwan market adjustments."""
-        if 'close' not in price_data.columns:
-            raise ValueError("Price data must contain 'close' column")
+    def _analyze_feature_stability(self, model: LightGBMAlphaModel) -> Dict[str, float]:
+        """Analyze feature importance stability."""
         
-        returns_list = []
+        if model.feature_importance_ is None:
+            return {}
         
-        # Calculate returns by symbol to handle MultiIndex properly
-        for symbol in price_data.index.get_level_values('symbol').unique():
-            symbol_prices = price_data.xs(symbol, level='symbol')
-            
-            # Calculate forward returns
-            forward_returns = (
-                symbol_prices['close'].shift(-horizon) / symbol_prices['close'] - 1
-            )
-            
-            # Add symbol back to index
-            forward_returns.index = pd.MultiIndex.from_product(
-                [forward_returns.index, [symbol]], 
-                names=['date', 'symbol']
-            )
-            
-            returns_list.append(forward_returns)
+        # Calculate feature stability metrics
+        top_features = model.feature_importance_.head(20)
         
-        return pd.concat(returns_list).sort_index()
-    
-    def _run_cross_validation(self, X: pd.DataFrame, y: pd.Series) -> Dict[str, Any]:
-        """Run time-series cross-validation with memory optimization."""
-        logger.info(f"Running {self.training_config.cv_folds}-fold cross-validation")
-        
-        # Create time-series splits
-        dates = X.index.get_level_values('date').unique().sort_values()
-        cv_results = {
-            'fold_scores': [],
-            'fold_metrics': [],
-            'average_metrics': {}
+        stability_metrics = {
+            'top_feature_importance': top_features.iloc[0]['importance'] / top_features['importance'].sum(),
+            'top_10_concentration': top_features.head(10)['importance'].sum() / top_features['importance'].sum(),
+            'importance_gini': self._calculate_gini_coefficient(top_features['importance'].values)
         }
         
-        # Calculate fold size
-        n_dates = len(dates)
-        if self.training_config.expanding_window:
-            # Expanding window CV
-            initial_train_size = max(n_dates // (self.training_config.cv_folds + 1), 100)
-            test_size = n_dates // self.training_config.cv_folds
+        return stability_metrics
+    
+    def _calculate_gini_coefficient(self, values: np.ndarray) -> float:
+        """Calculate Gini coefficient for feature importance concentration."""
+        sorted_values = np.sort(values)
+        n = len(values)
+        cumsum = np.cumsum(sorted_values)
+        gini = (n + 1 - 2 * np.sum(cumsum) / cumsum[-1]) / n
+        return gini
+    
+    def _validate_model_performance(self, result: TrainingResult) -> bool:
+        """Validate that model performance meets minimum standards."""
+        
+        if not result.performance_summary:
+            return False
+        
+        # Check critical metrics
+        critical_checks = [
+            result.performance_summary.get('ic', 0) > 0.02,  # Minimum IC
+            result.performance_summary.get('hit_rate', 0) > 0.48,  # Minimum hit rate
+            result.performance_summary.get('sharpe_ratio', 0) > 0.5,  # Minimum Sharpe
+        ]
+        
+        return all(critical_checks)
+    
+    def _check_performance_targets(self, result: TrainingResult) -> bool:
+        """Check if performance meets Taiwan market targets."""
+        
+        if not result.performance_summary:
+            return False
+        
+        targets = self.config.performance_targets
+        
+        target_checks = [
+            result.performance_summary.get('ic', 0) >= targets['ic_threshold'],
+            result.performance_summary.get('sharpe_ratio', 0) >= targets['sharpe_threshold'],
+            result.performance_summary.get('max_drawdown', 1) <= targets['max_drawdown_threshold'],
+            result.performance_summary.get('hit_rate', 0) >= targets['hit_rate_threshold']
+        ]
+        
+        return all(target_checks)
+    
+    def _save_training_results(self, result: TrainingResult) -> None:
+        """Save training results to disk."""
+        
+        results_filename = f"{result.pipeline_id}_results.json"
+        results_path = Path(self.config.output_dir) / results_filename
+        
+        with open(results_path, 'w') as f:
+            json.dump(result.to_dict(), f, indent=2, default=str)
+        
+        logger.info(f"Training results saved to {results_path}")
+    
+    def load_trained_model(self, model_path: str) -> LightGBMAlphaModel:
+        """Load a previously trained model."""
+        model = LightGBMAlphaModel()
+        model.load_model(model_path)
+        return model
+    
+    def get_training_summary(self) -> Dict[str, Any]:
+        """Get summary of training pipeline configuration."""
+        return {
+            'pipeline_components': {
+                'hyperopt_enabled': self.config.enable_hyperopt,
+                'cv_enabled': self.config.enable_cv,
+                'walkforward_enabled': self.config.enable_walkforward,
+                'performance_tracking_enabled': self.config.enable_performance_tracking
+            },
+            'model_configuration': {
+                'target_horizons': self.config.target_horizons,
+                'validation_split': self.config.validation_split,
+                'early_stopping': self.config.enable_early_stopping
+            },
+            'performance_targets': self.config.performance_targets,
+            'output_directory': self.config.output_dir
+        }
+
+
+# Utility functions
+
+def create_taiwan_training_config(**kwargs) -> TrainingPipelineConfig:
+    """Create training pipeline configuration optimized for Taiwan market."""
+    config = TrainingPipelineConfig()
+    
+    # Taiwan market specific defaults
+    config.target_horizons = [5, 10, 20]  # 1 week, 2 weeks, 1 month
+    config.performance_targets = {
+        'ic_threshold': 0.06,  # Higher target for Taiwan
+        'sharpe_threshold': 2.0,  # Aggressive target
+        'max_drawdown_threshold': 0.15,  # Strict risk control
+        'hit_rate_threshold': 0.52  # Above random
+    }
+    config.hyperopt_trials = 100  # Thorough optimization
+    config.cv_folds = 5  # Standard CV
+    
+    # Apply overrides
+    for key, value in kwargs.items():
+        if hasattr(config, key):
+            setattr(config, key, value)
         else:
-            # Rolling window CV
-            fold_size = n_dates // self.training_config.cv_folds
-        
-        for fold in range(self.training_config.cv_folds):
-            logger.info(f"Processing CV fold {fold + 1}/{self.training_config.cv_folds}")
-            
-            if self.training_config.expanding_window:
-                train_end_idx = initial_train_size + fold * test_size
-                test_start_idx = train_end_idx + self.training_config.cv_gap_days
-                test_end_idx = min(test_start_idx + test_size, n_dates)
-                
-                train_dates = dates[:train_end_idx]
-                test_dates = dates[test_start_idx:test_end_idx]
-            else:
-                test_start_idx = fold * fold_size
-                test_end_idx = min(test_start_idx + fold_size, n_dates)
-                train_start_idx = max(0, test_start_idx - fold_size * 2)  # Use 2x data for training
-                
-                train_dates = dates[train_start_idx:test_start_idx - self.training_config.cv_gap_days]
-                test_dates = dates[test_start_idx:test_end_idx]
-            
-            if len(test_dates) == 0:
-                logger.warning(f"No test data for fold {fold + 1}, skipping")
-                continue
-            
-            # Create fold data
-            train_mask = X.index.get_level_values('date').isin(train_dates)
-            test_mask = X.index.get_level_values('date').isin(test_dates)
-            
-            X_fold_train = X[train_mask]
-            y_fold_train = y[train_mask] 
-            X_fold_test = X[test_mask]
-            y_fold_test = y[test_mask]
-            
-            # Train fold model
-            fold_model = LightGBMAlphaModel(self.model_config)
-            fold_model.train(X_fold_train, y_fold_train, verbose=False)
-            
-            # Evaluate fold
-            predictions = fold_model.predict(X_fold_test)
-            fold_metrics = self._calculate_fold_metrics(y_fold_test, predictions)
-            
-            cv_results['fold_scores'].append(fold_metrics['ic'])
-            cv_results['fold_metrics'].append(fold_metrics)
-            
-            logger.info(f"Fold {fold + 1} IC: {fold_metrics['ic']:.4f}")
-            
-            # Memory cleanup
-            del fold_model, X_fold_train, y_fold_train, X_fold_test, y_fold_test
-            gc.collect()
-        
-        # Calculate average metrics
-        if cv_results['fold_metrics']:
-            cv_results['average_metrics'] = {
-                'mean_ic': np.mean([m['ic'] for m in cv_results['fold_metrics']]),
-                'std_ic': np.std([m['ic'] for m in cv_results['fold_metrics']]),
-                'mean_rmse': np.mean([m['rmse'] for m in cv_results['fold_metrics']]),
-                'mean_sharpe': np.mean([m.get('sharpe', 0) for m in cv_results['fold_metrics']])
-            }
-            
-            logger.info(f"CV Results - IC: {cv_results['average_metrics']['mean_ic']:.4f} ± {cv_results['average_metrics']['std_ic']:.4f}")
-        
-        return cv_results
+            logger.warning(f"Unknown configuration parameter: {key}")
     
-    def _calculate_fold_metrics(self, y_true: pd.Series, y_pred: np.ndarray) -> Dict[str, float]:
-        """Calculate metrics for a single CV fold."""
-        metrics = {}
-        
-        # Information Coefficient (Spearman correlation)
-        ic = pd.Series(y_true).corr(pd.Series(y_pred), method='spearman')
-        metrics['ic'] = ic if not pd.isna(ic) else 0.0
-        
-        # RMSE
-        metrics['rmse'] = np.sqrt(np.mean((y_true - y_pred) ** 2))
-        
-        # Pearson correlation
-        pearson_corr = pd.Series(y_true).corr(pd.Series(y_pred))
-        metrics['correlation'] = pearson_corr if not pd.isna(pearson_corr) else 0.0
-        
-        # Hit rate (directional accuracy)
-        if len(y_true) > 1:
-            y_true_sign = np.sign(y_true)
-            y_pred_sign = np.sign(y_pred)
-            metrics['hit_rate'] = np.mean(y_true_sign == y_pred_sign)
-        else:
-            metrics['hit_rate'] = 0.5
-        
-        return metrics
+    return config
+
+
+def run_quick_training(
+    X: pd.DataFrame,
+    y: pd.Series,
+    enable_optimization: bool = True,
+    n_trials: int = 20
+) -> TrainingResult:
+    """Quick training pipeline for development/testing."""
     
-    def _train_model_ensemble(
-        self,
-        X_train: pd.DataFrame,
-        y_train: pd.Series,
-        X_val: pd.DataFrame,
-        y_val: pd.Series
-    ) -> List[TaiwanMarketModel]:
-        """Train ensemble of models."""
-        logger.info(f"Training ensemble of {self.training_config.ensemble_size} models")
-        
-        models = []
-        
-        for i in range(self.training_config.ensemble_size):
-            logger.info(f"Training model {i + 1}/{self.training_config.ensemble_size}")
-            
-            # Create model with slight variations for ensemble diversity
-            model_config = self.model_config
-            if self.training_config.bootstrap_samples and i > 0:
-                # Add some randomness for ensemble diversity
-                model_config.base_params['random_state'] = 42 + i
-                model_config.base_params['feature_fraction'] = max(0.5, 0.8 - i * 0.05)
-            
-            # Create and train model
-            base_model = LightGBMAlphaModel(model_config)
-            training_stats = base_model.train(
-                X_train, y_train,
-                validation_data=(X_val, y_val),
-                verbose=False
-            )
-            
-            # Wrap with Taiwan market adaptations
-            taiwan_model = TaiwanMarketModel(base_model, self.market_adaptations)
-            models.append(taiwan_model)
-            
-            # Store training stats
-            self.training_history.append({
-                'model_id': i,
-                'training_stats': training_stats,
-                'timestamp': datetime.now()
-            })
-            
-            logger.info(f"Model {i + 1} trained - Validation RMSE: {training_stats.get('best_score', 'N/A')}")
-        
-        self.trained_models = models
-        return models
+    config = create_taiwan_training_config(
+        enable_hyperopt=enable_optimization,
+        hyperopt_trials=n_trials,
+        hyperopt_timeout_hours=1,
+        cv_folds=3,
+        enable_walkforward=False  # Skip for quick training
+    )
     
-    def _final_validation(
-        self,
-        models: List[TaiwanMarketModel],
-        X_val: pd.DataFrame,
-        y_val: pd.Series
-    ) -> Dict[str, Any]:
-        """Perform final validation of trained models."""
-        logger.info("Running final validation")
-        
-        validation_results = {
-            'individual_model_performance': [],
-            'ensemble_performance': {},
-            'feature_importance_analysis': {},
-            'taiwan_market_analysis': {}
-        }
-        
-        # Evaluate individual models
-        all_predictions = []
-        for i, model in enumerate(models):
-            predictions = model.base_model.predict(X_val)
-            all_predictions.append(predictions)
-            
-            # Calculate individual metrics
-            individual_metrics = self._calculate_comprehensive_metrics(y_val, predictions)
-            individual_metrics['model_id'] = i
-            validation_results['individual_model_performance'].append(individual_metrics)
-        
-        # Evaluate ensemble
-        if len(models) > 1:
-            ensemble_pred = np.mean(all_predictions, axis=0)
-            ensemble_metrics = self._calculate_comprehensive_metrics(y_val, ensemble_pred)
-            validation_results['ensemble_performance'] = ensemble_metrics
-        
-        # Feature importance analysis
-        if len(models) > 0:
-            validation_results['feature_importance_analysis'] = (
-                self._analyze_feature_importance(models)
-            )
-        
-        # Best model selection
-        best_ic = max([m['ic'] for m in validation_results['individual_model_performance']])
-        validation_results['best_ic'] = best_ic
-        validation_results['meets_ic_threshold'] = best_ic >= self.training_config.min_ic_threshold
-        
-        logger.info(f"Final validation completed - Best IC: {best_ic:.4f}")
-        
-        return validation_results
+    pipeline = TaiwanMarketTrainingPipeline(config)
+    return pipeline.train_model(X, y)
+
+
+if __name__ == "__main__":
+    # Demo training pipeline
+    print("Taiwan Market Training Pipeline for LightGBM Alpha Model")
+    print("Integrates hyperparameter optimization, CV, and performance tracking")
     
-    def _calculate_comprehensive_metrics(self, y_true: pd.Series, y_pred: np.ndarray) -> Dict[str, float]:
-        """Calculate comprehensive performance metrics."""
-        metrics = {}
-        
-        # Basic metrics
-        metrics['ic'] = pd.Series(y_true).corr(pd.Series(y_pred), method='spearman')
-        metrics['correlation'] = pd.Series(y_true).corr(pd.Series(y_pred))
-        metrics['rmse'] = np.sqrt(np.mean((y_true - y_pred) ** 2))
-        metrics['mae'] = np.mean(np.abs(y_true - y_pred))
-        
-        # Handle NaN values
-        for key in ['ic', 'correlation']:
-            if pd.isna(metrics[key]):
-                metrics[key] = 0.0
-        
-        # Quantile performance
-        pred_quantiles = pd.qcut(y_pred, 5, labels=False)
-        quantile_returns = []
-        for q in range(5):
-            mask = pred_quantiles == q
-            if np.sum(mask) > 0:
-                quantile_returns.append(y_true.iloc[mask].mean())
-            else:
-                quantile_returns.append(0)
-        
-        # Long-short performance (Q5 - Q1)
-        metrics['long_short_return'] = quantile_returns[4] - quantile_returns[0]
-        metrics['hit_rate'] = np.mean(np.sign(y_true) == np.sign(y_pred))
-        
-        # Approximate Sharpe ratio
-        if np.std(quantile_returns) > 0:
-            metrics['sharpe_ratio'] = np.mean(quantile_returns) / np.std(quantile_returns)
-        else:
-            metrics['sharpe_ratio'] = 0.0
-        
-        return metrics
-    
-    def _analyze_feature_importance(self, models: List[TaiwanMarketModel]) -> Dict[str, Any]:
-        """Analyze feature importance across models."""
-        importance_analysis = {
-            'top_features': [],
-            'stability_metrics': {},
-            'category_analysis': {}
-        }
-        
-        # Collect feature importance from all models
-        all_importance = []
-        for model in models:
-            if model.base_model.feature_importance_ is not None:
-                importance_df = model.base_model.feature_importance_.copy()
-                importance_df['model_id'] = len(all_importance)
-                all_importance.append(importance_df)
-        
-        if not all_importance:
-            return importance_analysis
-        
-        # Combine importance across models
-        combined_importance = pd.concat(all_importance)
-        
-        # Calculate average importance per feature
-        avg_importance = combined_importance.groupby('feature')['importance'].agg([
-            'mean', 'std', 'count'
-        ]).sort_values('mean', ascending=False)
-        
-        # Top features
-        importance_analysis['top_features'] = avg_importance.head(20).to_dict('index')
-        
-        # Stability metrics (coefficient of variation)
-        avg_importance['cv'] = avg_importance['std'] / avg_importance['mean']
-        importance_analysis['stability_metrics'] = {
-            'mean_cv': avg_importance['cv'].mean(),
-            'stable_features': len(avg_importance[avg_importance['cv'] < 0.5]),
-            'total_features': len(avg_importance)
-        }
-        
-        return importance_analysis
-    
-    def _save_training_results(
-        self, 
-        models: List[TaiwanMarketModel], 
-        output_dir: Path
-    ) -> None:
-        """Save trained models and results."""
-        # Save models
-        model_dir = output_dir / 'models'
-        model_dir.mkdir(exist_ok=True)
-        
-        for i, model in enumerate(models):
-            model_path = model_dir / f'lightgbm_alpha_model_{i}.pkl'
-            model.base_model.save_model(model_path)
-        
-        # Save feature pipeline
-        pipeline_path = output_dir / 'feature_pipeline.pkl'
-        joblib.dump(self.feature_pipeline, pipeline_path)
-        
-        # Save training history
-        history_path = output_dir / 'training_history.pkl'
-        joblib.dump(self.training_history, history_path)
-        
-        # Save validation results
-        results_path = output_dir / 'validation_results.pkl'
-        joblib.dump(self.validation_results, results_path)
-        
-        logger.info(f"Training results saved to {output_dir}")
-    
-    def _get_data_statistics(
-        self, 
-        train_data: Dict[str, pd.DataFrame],
-        val_data: Dict[str, pd.DataFrame]
-    ) -> Dict[str, Any]:
-        """Get comprehensive data statistics."""
-        stats = {}
-        
-        for data_type in train_data.keys():
-            train_df = train_data[data_type]
-            val_df = val_data[data_type]
-            
-            stats[data_type] = {
-                'train_samples': len(train_df),
-                'val_samples': len(val_df),
-                'train_date_range': [
-                    train_df.index.get_level_values('date').min(),
-                    train_df.index.get_level_values('date').max()
-                ],
-                'val_date_range': [
-                    val_df.index.get_level_values('date').min(),
-                    val_df.index.get_level_values('date').max()
-                ],
-                'unique_symbols': train_df.index.get_level_values('symbol').nunique(),
-                'columns': list(train_df.columns)
-            }
-        
-        return stats
+    # Example configuration
+    config = create_taiwan_training_config()
+    print(f"Default training configuration created")
+    print(f"Target horizons: {config.target_horizons} days")
+    print(f"Performance targets: {config.performance_targets}")
