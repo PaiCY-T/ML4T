@@ -1,26 +1,23 @@
 """
-Model validation module for ML4T Taiwan market models.
+Validation Module - Task #28 Stream B
+Temporal consistency validation for Taiwan market ML pipeline.
 
-This module provides sophisticated time-series cross-validation capabilities
-that integrate with walk-forward validation and prevent data leakage.
+This module provides:
+- TemporalConsistencyValidator: Comprehensive validation
+- Data leakage detection
+- Taiwan market compliance checks
+- Pipeline integrity validation
+
+Key Components:
+- temporal_checks: Main validation implementation
 """
 
-from .timeseries_cv import (
-    TimeSeriesCrossValidator,
-    PurgedGroupTimeSeriesSplit,
-    TimeSeriesCVConfig,
-    CVFoldResult,
-    CVSplitType,
-    create_taiwan_cv_config,
-    run_model_cv
+from .temporal_checks import (
+    TemporalConsistencyValidator,
+    validate_pipeline_temporal_integrity
 )
 
 __all__ = [
-    'TimeSeriesCrossValidator',
-    'PurgedGroupTimeSeriesSplit', 
-    'TimeSeriesCVConfig',
-    'CVFoldResult',
-    'CVSplitType',
-    'create_taiwan_cv_config',
-    'run_model_cv'
+    'TemporalConsistencyValidator', 
+    'validate_pipeline_temporal_integrity'
 ]
