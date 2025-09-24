@@ -12,7 +12,12 @@
       "Bash(git checkout:*)",
       "Bash(git submodule:*)",
       "Bash(git add:*)",
-      "Bash(git commit:*)"
+      "Bash(git commit:*)",
+      "Bash(chmod:*)",
+      "Bash(dos2unix:*)",
+      "Bash(sed:*)",
+      "Bash(find:*)",
+      "Bash(gh issue list:*)"
     ],
     "deny": [],
     "ask": []
