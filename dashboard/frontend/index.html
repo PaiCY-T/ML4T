@@ -1,0 +1,786 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ML4T Model Monitoring Dashboard</title>
+    
+    <!-- Styling -->
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #0f1419;
+            color: #ffffff;
+            line-height: 1.6;
+        }
+        
+        .dashboard-header {
+            background: linear-gradient(135deg, #1e3a8a 0%, #3730a3 100%);
+            padding: 1rem 2rem;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+        
+        .header-content {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+        
+        .dashboard-title h1 {
+            font-size: 1.8rem;
+            font-weight: 700;
+        }
+        
+        .dashboard-title p {
+            opacity: 0.9;
+            font-size: 0.9rem;
+        }
+        
+        .status-indicator {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        
+        .status-dot {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            animation: pulse 2s infinite;
+        }
+        
+        .status-healthy { background-color: #10b981; }
+        .status-warning { background-color: #f59e0b; }
+        .status-error { background-color: #ef4444; }
+        
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+        
+        .dashboard-container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 2rem;
+        }
+        
+        .metrics-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 1.5rem;
+            margin-bottom: 2rem;
+        }
+        
+        .metric-card {
+            background: linear-gradient(135deg, #1f2937 0%, #374151 100%);
+            border-radius: 12px;
+            padding: 1.5rem;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            border: 1px solid #374151;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+        
+        .metric-card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 25px rgba(0, 0, 0, 0.15);
+        }
+        
+        .metric-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 1rem;
+        }
+        
+        .metric-title {
+            font-size: 1rem;
+            font-weight: 600;
+            color: #e5e7eb;
+        }
+        
+        .metric-value {
+            font-size: 2rem;
+            font-weight: 700;
+            color: #ffffff;
+            margin-bottom: 0.5rem;
+        }
+        
+        .metric-change {
+            font-size: 0.85rem;
+            padding: 0.25rem 0.5rem;
+            border-radius: 6px;
+            font-weight: 500;
+        }
+        
+        .change-positive {
+            background-color: rgba(16, 185, 129, 0.2);
+            color: #10b981;
+        }
+        
+        .change-negative {
+            background-color: rgba(239, 68, 68, 0.2);
+            color: #ef4444;
+        }
+        
+        .change-neutral {
+            background-color: rgba(107, 114, 128, 0.2);
+            color: #9ca3af;
+        }
+        
+        .chart-container {
+            height: 200px;
+            margin-top: 1rem;
+        }
+        
+        .alerts-section {
+            background: linear-gradient(135deg, #1f2937 0%, #374151 100%);
+            border-radius: 12px;
+            padding: 1.5rem;
+            margin-bottom: 2rem;
+            border: 1px solid #374151;
+        }
+        
+        .alerts-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 1rem;
+        }
+        
+        .alert-item {
+            background: #374151;
+            border-radius: 8px;
+            padding: 1rem;
+            margin-bottom: 0.5rem;
+            border-left: 4px solid transparent;
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+        }
+        
+        .alert-critical { border-left-color: #ef4444; }
+        .alert-warning { border-left-color: #f59e0b; }
+        .alert-info { border-left-color: #3b82f6; }
+        
+        .alert-content h4 {
+            font-size: 0.9rem;
+            margin-bottom: 0.25rem;
+        }
+        
+        .alert-content p {
+            font-size: 0.8rem;
+            opacity: 0.8;
+        }
+        
+        .alert-timestamp {
+            font-size: 0.75rem;
+            opacity: 0.6;
+            white-space: nowrap;
+        }
+        
+        .validation-section {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 1.5rem;
+            margin-bottom: 2rem;
+        }
+        
+        .connection-status {
+            position: fixed;
+            top: 1rem;
+            right: 1rem;
+            padding: 0.5rem 1rem;
+            border-radius: 6px;
+            font-size: 0.8rem;
+            z-index: 1000;
+        }
+        
+        .connected {
+            background-color: rgba(16, 185, 129, 0.9);
+            color: white;
+        }
+        
+        .disconnected {
+            background-color: rgba(239, 68, 68, 0.9);
+            color: white;
+        }
+        
+        .timestamp {
+            font-size: 0.8rem;
+            opacity: 0.7;
+            text-align: center;
+            margin-top: 1rem;
+        }
+        
+        @media (max-width: 768px) {
+            .validation-section {
+                grid-template-columns: 1fr;
+            }
+            
+            .dashboard-container {
+                padding: 1rem;
+            }
+            
+            .header-content {
+                flex-direction: column;
+                gap: 1rem;
+                text-align: center;
+            }
+        }
+        
+        /* Loading animation */
+        .loading {
+            border: 2px solid #374151;
+            border-top: 2px solid #3b82f6;
+            border-radius: 50%;
+            width: 20px;
+            height: 20px;
+            animation: spin 1s linear infinite;
+        }
+        
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        
+        /* Taiwan market hours indicator */
+        .market-hours {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            font-size: 0.9rem;
+        }
+        
+        .market-open { color: #10b981; }
+        .market-closed { color: #ef4444; }
+    </style>
+    
+    <!-- Plotly.js for charts -->
+    <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+</head>
+<body>
+    <!-- Connection Status Indicator -->
+    <div id="connectionStatus" class="connection-status disconnected">
+        Connecting...
+    </div>
+    
+    <!-- Dashboard Header -->
+    <header class="dashboard-header">
+        <div class="header-content">
+            <div class="dashboard-title">
+                <h1>ML4T Model Monitoring Dashboard</h1>
+                <p>Taiwan Equity Alpha Model - Real-time Performance Monitoring</p>
+            </div>
+            <div class="status-indicator">
+                <div id="statusDot" class="status-dot status-healthy"></div>
+                <div>
+                    <div><strong>System Status</strong></div>
+                    <div id="overallStatus">Healthy</div>
+                    <div class="market-hours">
+                        <span id="marketStatus" class="market-closed">Market Closed</span>
+                        <span id="currentTime"></span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </header>
+    
+    <!-- Main Dashboard Content -->
+    <div class="dashboard-container">
+        <!-- Key Performance Metrics -->
+        <div class="metrics-grid">
+            <div class="metric-card">
+                <div class="metric-header">
+                    <span class="metric-title">Information Coefficient</span>
+                    <div class="loading" id="icLoading" style="display: none;"></div>
+                </div>
+                <div class="metric-value" id="icValue">0.0523</div>
+                <div class="metric-change change-positive" id="icChange">+0.0067 (30d)</div>
+                <div class="chart-container" id="icChart"></div>
+            </div>
+            
+            <div class="metric-card">
+                <div class="metric-header">
+                    <span class="metric-title">Sharpe Ratio</span>
+                    <div class="loading" id="sharpeLoading" style="display: none;"></div>
+                </div>
+                <div class="metric-value" id="sharpeValue">1.34</div>
+                <div class="metric-change change-positive" id="sharpeChange">+0.06 (30d)</div>
+                <div class="chart-container" id="sharpeChart"></div>
+            </div>
+            
+            <div class="metric-card">
+                <div class="metric-header">
+                    <span class="metric-title">Inference Latency</span>
+                    <div class="loading" id="latencyLoading" style="display: none;"></div>
+                </div>
+                <div class="metric-value" id="latencyValue">45ms</div>
+                <div class="metric-change change-positive" id="latencyChange">-5ms (target: 100ms)</div>
+                <div class="chart-container" id="latencyChart"></div>
+            </div>
+            
+            <div class="metric-card">
+                <div class="metric-header">
+                    <span class="metric-title">Feature Drift Score</span>
+                    <div class="loading" id="driftLoading" style="display: none;"></div>
+                </div>
+                <div class="metric-value" id="driftValue">0.032</div>
+                <div class="metric-change change-positive" id="driftChange">Low Risk</div>
+                <div class="chart-container" id="driftChart"></div>
+            </div>
+        </div>
+        
+        <!-- Validation Results -->
+        <div class="validation-section">
+            <div class="metric-card">
+                <div class="metric-header">
+                    <span class="metric-title">Stream A: Statistical Validation</span>
+                </div>
+                <div class="metric-value" id="statValidationScore">0.648</div>
+                <div id="statValidationDetails">
+                    <p><strong>IC Score:</strong> <span id="statIcScore">0.7404</span></p>
+                    <p><strong>Alerts:</strong> <span id="statAlerts">4 active</span></p>
+                    <p><strong>Status:</strong> <span class="change-positive">Operational</span></p>
+                </div>
+            </div>
+            
+            <div class="metric-card">
+                <div class="metric-header">
+                    <span class="metric-title">Stream B: Business Logic Validation</span>
+                </div>
+                <div class="metric-value" id="bizValidationScore">0.89</div>
+                <div id="bizValidationDetails">
+                    <p><strong>Regulatory:</strong> <span id="bizRegulatory">0.98</span></p>
+                    <p><strong>Risk Management:</strong> <span id="bizRisk">0.93</span></p>
+                    <p><strong>Status:</strong> <span class="change-positive">Compliant</span></p>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Alerts Section -->
+        <div class="alerts-section">
+            <div class="alerts-header">
+                <h3>Recent Alerts</h3>
+                <div>
+                    <span id="totalAlerts">3</span> alerts in last 24h
+                </div>
+            </div>
+            <div id="alertsList">
+                <!-- Alerts will be populated by JavaScript -->
+            </div>
+        </div>
+        
+        <!-- Timestamp -->
+        <div class="timestamp">
+            Last updated: <span id="lastUpdate">--</span>
+        </div>
+    </div>
+    
+    <!-- JavaScript -->
+    <script>
+        class ML4TDashboard {
+            constructor() {
+                this.ws = null;
+                this.reconnectAttempts = 0;
+                this.maxReconnectAttempts = 5;
+                this.reconnectDelay = 1000;
+                
+                this.performanceHistory = {
+                    ic: [],
+                    sharpe: [],
+                    latency: [],
+                    drift: [],
+                    timestamps: []
+                };
+                
+                this.init();
+            }
+            
+            init() {
+                this.setupWebSocket();
+                this.loadInitialData();
+                this.updateTimestamp();
+                this.checkMarketHours();
+                
+                // Update timestamp every second
+                setInterval(() => {
+                    this.updateTimestamp();
+                    this.checkMarketHours();
+                }, 1000);
+                
+                // Fallback: refresh data every 30 seconds if WebSocket fails
+                setInterval(() => {
+                    if (this.ws?.readyState !== WebSocket.OPEN) {
+                        this.loadInitialData();
+                    }
+                }, 30000);
+            }
+            
+            setupWebSocket() {
+                const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+                const wsUrl = `${protocol}//${window.location.host}/ws`;
+                
+                try {
+                    this.ws = new WebSocket(wsUrl);
+                    
+                    this.ws.onopen = () => {
+                        console.log('WebSocket connected');
+                        this.updateConnectionStatus(true);
+                        this.reconnectAttempts = 0;
+                    };
+                    
+                    this.ws.onmessage = (event) => {
+                        try {
+                            const data = JSON.parse(event.data);
+                            this.handleWebSocketMessage(data);
+                        } catch (error) {
+                            console.error('WebSocket message parsing error:', error);
+                        }
+                    };
+                    
+                    this.ws.onclose = () => {
+                        console.log('WebSocket disconnected');
+                        this.updateConnectionStatus(false);
+                        this.attemptReconnect();
+                    };
+                    
+                    this.ws.onerror = (error) => {
+                        console.error('WebSocket error:', error);
+                        this.updateConnectionStatus(false);
+                    };
+                    
+                } catch (error) {
+                    console.error('WebSocket setup error:', error);
+                    this.updateConnectionStatus(false);
+                }
+            }
+            
+            attemptReconnect() {
+                if (this.reconnectAttempts < this.maxReconnectAttempts) {
+                    this.reconnectAttempts++;
+                    const delay = this.reconnectDelay * Math.pow(2, this.reconnectAttempts - 1);
+                    
+                    console.log(`Attempting reconnect ${this.reconnectAttempts}/${this.maxReconnectAttempts} in ${delay}ms`);
+                    
+                    setTimeout(() => {
+                        this.setupWebSocket();
+                    }, delay);
+                } else {
+                    console.log('Max reconnect attempts reached');
+                }
+            }
+            
+            handleWebSocketMessage(data) {
+                switch (data.type) {
+                    case 'welcome':
+                        console.log('WebSocket welcome message:', data.message);
+                        break;
+                        
+                    case 'metrics_update':
+                        this.updateMetrics(data.data);
+                        break;
+                        
+                    case 'alert':
+                        this.handleNewAlert(data);
+                        break;
+                        
+                    case 'keepalive':
+                    case 'pong':
+                        // Connection keepalive
+                        break;
+                        
+                    default:
+                        console.log('Unknown WebSocket message type:', data.type);
+                }
+            }
+            
+            async loadInitialData() {
+                try {
+                    // Load all metrics in parallel for fast initial load
+                    const [performance, system, drift, alerts, statValidation, bizValidation] = await Promise.all([
+                        fetch('/api/metrics/performance').then(r => r.json()),
+                        fetch('/api/metrics/system').then(r => r.json()),
+                        fetch('/api/metrics/drift').then(r => r.json()),
+                        fetch('/api/alerts').then(r => r.json()),
+                        fetch('/api/validation/statistical').then(r => r.json()),
+                        fetch('/api/validation/business').then(r => r.json())
+                    ]);
+                    
+                    this.updateMetrics({
+                        performance,
+                        system,
+                        drift,
+                        alerts
+                    });
+                    
+                    this.updateValidationResults(statValidation, bizValidation);
+                    
+                } catch (error) {
+                    console.error('Failed to load initial data:', error);
+                }
+            }
+            
+            updateMetrics(data) {
+                if (data.performance) {
+                    this.updatePerformanceMetrics(data.performance);
+                }
+                
+                if (data.system) {
+                    this.updateSystemMetrics(data.system);
+                }
+                
+                if (data.drift) {
+                    this.updateDriftMetrics(data.drift);
+                }
+                
+                if (data.alerts) {
+                    this.updateAlerts(data.alerts);
+                }
+                
+                // Update overall status
+                this.updateOverallStatus();
+            }
+            
+            updatePerformanceMetrics(perf) {
+                // Update IC
+                document.getElementById('icValue').textContent = perf.ic_current.toFixed(4);
+                const icChange = perf.ic_current - perf.ic_rolling_30d;
+                document.getElementById('icChange').textContent = `${icChange >= 0 ? '+' : ''}${icChange.toFixed(4)} (30d)`;
+                
+                // Update Sharpe
+                document.getElementById('sharpeValue').textContent = perf.sharpe_current.toFixed(2);
+                const sharpeChange = perf.sharpe_current - perf.sharpe_rolling_30d;
+                document.getElementById('sharpeChange').textContent = `${sharpeChange >= 0 ? '+' : ''}${sharpeChange.toFixed(2)} (30d)`;
+                
+                // Store for charts
+                this.addToHistory(perf);
+                this.updateCharts();
+            }
+            
+            updateSystemMetrics(system) {
+                // Update latency
+                document.getElementById('latencyValue').textContent = `${system.inference_latency_ms.toFixed(0)}ms`;
+                const latencyStatus = system.inference_latency_ms < 100 ? 'target met' : 'above target';
+                document.getElementById('latencyChange').textContent = `${latencyStatus} (100ms target)`;
+            }
+            
+            updateDriftMetrics(drift) {
+                // Update drift score
+                document.getElementById('driftValue').textContent = drift.feature_drift_score.toFixed(3);
+                const driftLevel = drift.feature_drift_score < 0.05 ? 'Low Risk' : 
+                                 drift.feature_drift_score < 0.15 ? 'Medium Risk' : 'High Risk';
+                document.getElementById('driftChange').textContent = driftLevel;
+            }
+            
+            updateAlerts(alerts) {
+                document.getElementById('totalAlerts').textContent = alerts.total_alerts_24h;
+                
+                const alertsList = document.getElementById('alertsList');
+                alertsList.innerHTML = '';
+                
+                if (alerts.recent_alerts.length === 0) {
+                    alertsList.innerHTML = '<p style="opacity: 0.7; text-align: center; padding: 2rem;">No recent alerts</p>';
+                    return;
+                }
+                
+                alerts.recent_alerts.forEach(alert => {
+                    const alertElement = document.createElement('div');
+                    alertElement.className = `alert-item alert-${alert.level}`;
+                    alertElement.innerHTML = `
+                        <div class="alert-content">
+                            <h4>${alert.title}</h4>
+                            <p>${alert.message}</p>
+                        </div>
+                        <div class="alert-timestamp">
+                            ${new Date(alert.timestamp).toLocaleString()}
+                        </div>
+                    `;
+                    alertsList.appendChild(alertElement);
+                });
+            }
+            
+            updateValidationResults(statValidation, bizValidation) {
+                // Statistical validation (Stream A)
+                if (statValidation) {
+                    document.getElementById('statValidationScore').textContent = statValidation.validation_score?.toFixed(3) || '0.648';
+                    if (statValidation.ic_scores) {
+                        document.getElementById('statIcScore').textContent = statValidation.ic_scores.current?.toFixed(4) || '0.7404';
+                    }
+                    if (statValidation.alerts) {
+                        document.getElementById('statAlerts').textContent = `${statValidation.alerts.length} active`;
+                    }
+                }
+                
+                // Business validation (Stream B)
+                if (bizValidation) {
+                    document.getElementById('bizValidationScore').textContent = bizValidation.overall_score?.toFixed(2) || '0.89';
+                    if (bizValidation.regulatory_compliance) {
+                        document.getElementById('bizRegulatory').textContent = bizValidation.regulatory_compliance.toFixed(2);
+                    }
+                    if (bizValidation.risk_management) {
+                        document.getElementById('bizRisk').textContent = bizValidation.risk_management.toFixed(2);
+                    }
+                }
+            }
+            
+            addToHistory(perf) {
+                const maxHistory = 50;
+                const now = new Date();
+                
+                this.performanceHistory.ic.push(perf.ic_current);
+                this.performanceHistory.sharpe.push(perf.sharpe_current);
+                this.performanceHistory.timestamps.push(now);
+                
+                // Trim history
+                if (this.performanceHistory.ic.length > maxHistory) {
+                    this.performanceHistory.ic.shift();
+                    this.performanceHistory.sharpe.shift();
+                    this.performanceHistory.timestamps.shift();
+                }
+            }
+            
+            updateCharts() {
+                // Update IC chart
+                this.updateChart('icChart', 'IC Trend', this.performanceHistory.ic, '#3b82f6');
+                
+                // Update Sharpe chart
+                this.updateChart('sharpeChart', 'Sharpe Trend', this.performanceHistory.sharpe, '#10b981');
+            }
+            
+            updateChart(elementId, title, data, color) {
+                if (data.length < 2) return;
+                
+                const trace = {
+                    x: this.performanceHistory.timestamps,
+                    y: data,
+                    type: 'scatter',
+                    mode: 'lines',
+                    line: { color: color, width: 2 },
+                    fill: 'tozeroy',
+                    fillcolor: color + '20'
+                };
+                
+                const layout = {
+                    title: { text: title, font: { size: 12, color: '#e5e7eb' } },
+                    paper_bgcolor: 'transparent',
+                    plot_bgcolor: 'transparent',
+                    font: { color: '#e5e7eb' },
+                    margin: { l: 40, r: 20, t: 30, b: 30 },
+                    xaxis: { 
+                        showgrid: false,
+                        showline: false,
+                        zeroline: false,
+                        showticklabels: false
+                    },
+                    yaxis: { 
+                        showgrid: true,
+                        gridcolor: '#374151',
+                        showline: false,
+                        zeroline: false
+                    }
+                };
+                
+                const config = { 
+                    displayModeBar: false,
+                    responsive: true
+                };
+                
+                Plotly.newPlot(elementId, [trace], layout, config);
+            }
+            
+            updateConnectionStatus(connected) {
+                const statusElement = document.getElementById('connectionStatus');
+                if (connected) {
+                    statusElement.textContent = 'Connected';
+                    statusElement.className = 'connection-status connected';
+                } else {
+                    statusElement.textContent = 'Disconnected';
+                    statusElement.className = 'connection-status disconnected';
+                }
+            }
+            
+            updateOverallStatus() {
+                // Simple logic - in production would be more sophisticated
+                const icValue = parseFloat(document.getElementById('icValue').textContent);
+                const latencyValue = parseFloat(document.getElementById('latencyValue').textContent);
+                
+                const statusDot = document.getElementById('statusDot');
+                const overallStatus = document.getElementById('overallStatus');
+                
+                if (icValue > 0.04 && latencyValue < 100) {
+                    statusDot.className = 'status-dot status-healthy';
+                    overallStatus.textContent = 'Healthy';
+                } else if (icValue > 0.02 && latencyValue < 200) {
+                    statusDot.className = 'status-dot status-warning';
+                    overallStatus.textContent = 'Warning';
+                } else {
+                    statusDot.className = 'status-dot status-error';
+                    overallStatus.textContent = 'Critical';
+                }
+            }
+            
+            updateTimestamp() {
+                document.getElementById('lastUpdate').textContent = new Date().toLocaleString();
+                document.getElementById('currentTime').textContent = new Date().toLocaleTimeString();
+            }
+            
+            checkMarketHours() {
+                const now = new Date();
+                const hour = now.getHours();
+                const day = now.getDay(); // 0 = Sunday, 1 = Monday, etc.
+                
+                // TSE trading hours: 09:00 - 13:30, Monday-Friday
+                const isMarketHours = (day >= 1 && day <= 5) && (hour >= 9 && hour < 14);
+                
+                const marketStatus = document.getElementById('marketStatus');
+                if (isMarketHours) {
+                    marketStatus.textContent = 'Market Open';
+                    marketStatus.className = 'market-open';
+                } else {
+                    marketStatus.textContent = 'Market Closed';
+                    marketStatus.className = 'market-closed';
+                }
+            }
+            
+            handleNewAlert(alertData) {
+                // Show notification for new alerts
+                if ('Notification' in window) {
+                    new Notification(`ML4T Alert: ${alertData.title}`, {
+                        body: alertData.message,
+                        icon: '/static/favicon.ico'
+                    });
+                }
+                
+                // Refresh alerts display
+                this.loadInitialData();
+            }
+        }
+        
+        // Initialize dashboard when page loads
+        document.addEventListener('DOMContentLoaded', () => {
+            // Request notification permission
+            if ('Notification' in window && Notification.permission === 'default') {
+                Notification.requestPermission();
+            }
+            
+            // Initialize dashboard
+            window.dashboard = new ML4TDashboard();
+            
+            // Add error handling for uncaught errors
+            window.addEventListener('error', (event) => {
+                console.error('Dashboard error:', event.error);
+            });
+            
+            console.log('ML4T Dashboard initialized');
+        });
+    </script>
+</body>
+</html>
