@@ -1,0 +1,121 @@
+version: '3.8'
+
+services:
+  ml4t-inference:
+    build:
+      context: ..
+      dockerfile: deployment/Dockerfile
+    image: ml4t/inference:latest
+    container_name: ml4t-inference
+    restart: unless-stopped
+    ports:
+      - "8080:8080"  # Inference API
+      - "8090:8090"  # Health check endpoint
+    environment:
+      - ENVIRONMENT=production
+      - LOG_LEVEL=INFO
+      - MODEL_PATH=/app/models/lightgbm_alpha.pkl
+      - MAX_WORKERS=4
+      - BATCH_SIZE=500
+      - MAX_LATENCY_MS=100
+      - ENABLE_GPU=false
+    volumes:
+      - ../models:/app/models:ro
+      - ../data:/app/data:ro
+      - ./logs:/app/logs
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8090/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 16G
+        reservations:
+          cpus: '2'
+          memory: 8G
+
+  ml4t-monitoring:
+    build:
+      context: ..
+      dockerfile: deployment/Dockerfile.monitoring
+    image: ml4t/monitoring:latest
+    container_name: ml4t-monitoring
+    restart: unless-stopped
+    ports:
+      - "8091:8091"  # Monitoring dashboard
+    environment:
+      - ENVIRONMENT=production
+      - LOG_LEVEL=INFO
+      - INFERENCE_ENDPOINT=http://ml4t-inference:8080
+      - ALERT_EMAIL_ENABLED=true
+      - SMTP_HOST=${SMTP_HOST}
+      - SMTP_PORT=${SMTP_PORT}
+      - SMTP_USERNAME=${SMTP_USERNAME}
+      - SMTP_PASSWORD=${SMTP_PASSWORD}
+      - ALERT_RECIPIENTS=${ALERT_RECIPIENTS}
+    volumes:
+      - ./logs:/app/logs
+      - ./monitoring:/app/monitoring
+    depends_on:
+      ml4t-inference:
+        condition: service_healthy
+
+  redis:
+    image: redis:7-alpine
+    container_name: ml4t-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: ml4t-prometheus
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=7d'
+      - '--web.enable-lifecycle'
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: ml4t-grafana
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD}
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning
+    depends_on:
+      - prometheus
+
+volumes:
+  redis_data:
+  prometheus_data:
+  grafana_data:
+
+networks:
+  default:
+    name: ml4t-network
