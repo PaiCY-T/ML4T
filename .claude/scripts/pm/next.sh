@@ -18,17 +18,38 @@ for epic_dir in .claude/epics/*/; do
     [ -f "$task_file" ] || continue
 
     # Check if task is open
-    status=$(grep "^status:" "$task_file" | head -1 | sed 's/^status: *//')
+    status=$(grep "^status:" "$task_file" | head -1 | sed 's/^status: *//' | tr -d '\r')
     [ "$status" != "open" ] && [ -n "$status" ] && continue
 
-    # Check dependencies
-    deps=$(grep "^depends_on:" "$task_file" | head -1 | sed 's/^depends_on: *\[//' | sed 's/\]//')
+    # Check dependencies - try both formats
+    deps=$(grep -E "^(dependencies|depends_on):" "$task_file" | head -1 | sed 's/^[^:]*: *\[//' | sed 's/\]//' | tr -d '\r')
 
-    # If no dependencies or empty, task is available
-    if [ -z "$deps" ] || [ "$deps" = "depends_on:" ]; then
-      task_name=$(grep "^name:" "$task_file" | head -1 | sed 's/^name: *//')
+    # Check if all dependencies are completed
+    deps_ready=true
+    if [ -n "$deps" ] && [ "$deps" != "dependencies:" ] && [ "$deps" != "depends_on:" ]; then
+      # Parse comma-separated dependencies
+      IFS=',' read -ra dep_array <<< "$deps"
+      for dep in "${dep_array[@]}"; do
+        dep=$(echo "$dep" | tr -d ' ')  # Remove spaces
+        dep_file="${epic_dir}${dep}.md"
+        if [ -f "$dep_file" ]; then
+          dep_status=$(grep "^status:" "$dep_file" | head -1 | sed 's/^status: *//' | tr -d '\r')
+          if [ "$dep_status" != "completed" ] && [ "$dep_status" != "closed" ] && [ "$dep_status" != "done" ]; then
+            deps_ready=false
+            break
+          fi
+        else
+          deps_ready=false
+          break
+        fi
+      done
+    fi
+
+    # If all dependencies are completed, task is available
+    if [ "$deps_ready" = "true" ]; then
+      task_name=$(grep "^name:" "$task_file" | head -1 | sed 's/^name: *//' | tr -d '\r')
       task_num=$(basename "$task_file" .md)
-      parallel=$(grep "^parallel:" "$task_file" | head -1 | sed 's/^parallel: *//')
+      parallel=$(grep "^parallel:" "$task_file" | head -1 | sed 's/^parallel: *//' | tr -d '\r')
 
       echo "✅ Ready: #$task_num - $task_name"
       echo "   Epic: $epic_name"

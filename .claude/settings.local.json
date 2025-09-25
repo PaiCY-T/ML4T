@@ -17,7 +17,9 @@
       "Bash(dos2unix:*)",
       "Bash(sed:*)",
       "Bash(find:*)",
-      "Bash(gh issue list:*)"
+      "Bash(gh issue list:*)",
+      "Bash(git worktree:*)",
+      "Bash(grep:*)"
     ],
     "deny": [],
     "ask": []

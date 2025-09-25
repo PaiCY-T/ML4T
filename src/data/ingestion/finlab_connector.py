@@ -21,12 +21,16 @@ import aiohttp
 from concurrent.futures import ThreadPoolExecutor
 
 from ..core.temporal import (
-    TemporalValue, DataType, TemporalStore, 
+    TemporalValue, DataType, TemporalStore,
     is_taiwan_trading_day, get_previous_trading_day
 )
 from ..models.taiwan_market import (
     TaiwanMarketData, TaiwanFundamental, TaiwanCorporateAction,
     CorporateActionType, TradingStatus, TaiwanMarketDataValidator
+)
+from .finlab_auth import (
+    FinLabAuthenticator, AuthConfig, AuthToken, AuthenticationError,
+    require_auth, create_finlab_authenticator
 )
 
 logger = logging.getLogger(__name__)
@@ -34,22 +38,64 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class FinLabConfig:
-    """FinLab database configuration."""
-    host: str
+    """FinLab database configuration with enhanced authentication."""
+    # Authentication configuration (preferred method)
+    auth_config: Optional[AuthConfig] = None
+
+    # Legacy database configuration (fallback)
+    host: Optional[str] = None
     port: int = 5432
     database: str = "finlab"
-    username: str = "finlab"
+    username: Optional[str] = None
     password: str = ""
+
+    # Connection pool settings
     pool_size: int = 10
     max_overflow: int = 20
     pool_timeout: int = 30
     pool_recycle: int = 3600
     echo: bool = False
-    
+
+    def __post_init__(self):
+        """Initialize authentication configuration."""
+        if self.auth_config is None:
+            # Create auth config from legacy parameters or environment
+            self.auth_config = AuthConfig()
+
+            # Override with legacy parameters if provided
+            if self.host:
+                self.auth_config.db_host = self.host
+            if self.username:
+                self.auth_config.db_username = self.username
+            if self.password:
+                self.auth_config.db_password = self.password
+            if self.database != "finlab":
+                self.auth_config.db_database = self.database
+
+            self.auth_config.db_port = self.port
+
     def get_connection_string(self) -> str:
-        """Generate SQLAlchemy connection string."""
+        """Generate SQLAlchemy connection string with enhanced authentication."""
+        if self.auth_config and self.auth_config.has_db_auth:
+            return self.auth_config.get_db_connection_string()
+
+        # Fallback to legacy method
+        if not self.host or not self.username:
+            raise ValueError("Database authentication not properly configured")
+
         return (f"postgresql://{self.username}:{self.password}@"
                 f"{self.host}:{self.port}/{self.database}")
+
+    @property
+    def has_token_auth(self) -> bool:
+        """Check if token authentication is available."""
+        return self.auth_config and self.auth_config.has_token_auth
+
+    @property
+    def has_db_auth(self) -> bool:
+        """Check if database authentication is available."""
+        return ((self.auth_config and self.auth_config.has_db_auth) or
+                (self.host and self.username))
 
 
 @dataclass
@@ -164,43 +210,70 @@ class FinLabFieldMapping:
 
 
 class FinLabConnector:
-    """High-performance connector to FinLab database with temporal consistency."""
-    
-    def __init__(self, 
+    """High-performance connector to FinLab database with enhanced authentication."""
+
+    def __init__(self,
                  config: FinLabConfig,
                  temporal_store: TemporalStore,
                  enable_cache: bool = True,
-                 max_workers: int = 4):
+                 max_workers: int = 4,
+                 authenticator: Optional[FinLabAuthenticator] = None):
         self.config = config
         self.temporal_store = temporal_store
         self.enable_cache = enable_cache
         self.max_workers = max_workers
-        
+
+        # Authentication system
+        if authenticator:
+            self._authenticator = authenticator
+        else:
+            self._authenticator = FinLabAuthenticator(self.config.auth_config)
+
         # Database connection
         self.engine = None
         self.session_factory = None
         self.metadata = None
-        
+
+        # Current authentication token
+        self._current_token: Optional[AuthToken] = None
+
         # Data validation
         self.validator = TaiwanMarketDataValidator()
-        
+
         # Field mapping
         self.field_mapping = FinLabFieldMapping.get_all_fields()
-        
+
         # Cache for frequently accessed data
         self._symbol_cache: Dict[str, Dict] = {}
         self._metadata_cache: Dict[str, Any] = {}
-        
+
         # Performance metrics
         self.query_count = 0
         self.cache_hits = 0
         self.total_query_time = 0.0
-        
-        logger.info(f"FinLab connector initialized with {len(self.field_mapping)} mapped fields")
+        self.auth_errors = 0
+
+        logger.info(f"FinLab connector initialized with {len(self.field_mapping)} mapped fields and enhanced authentication")
     
     def connect(self) -> None:
-        """Establish database connection."""
+        """Establish database connection with enhanced authentication."""
         try:
+            # Authenticate first if using token-based auth
+            if self.config.has_token_auth:
+                try:
+                    self._current_token = self._authenticator.get_token()
+                    logger.info(f"Authentication successful with {self._current_token.token_type} token")
+                except AuthenticationError as e:
+                    self.auth_errors += 1
+                    logger.error(f"Authentication failed: {e}")
+
+                    # Fall back to database auth if available
+                    if not self.config.has_db_auth:
+                        raise
+
+                    logger.warning("Falling back to database authentication")
+
+            # Establish database connection
             connection_string = self.config.get_connection_string()
             self.engine = create_engine(
                 connection_string,
@@ -210,16 +283,20 @@ class FinLabConnector:
                 pool_recycle=self.config.pool_recycle,
                 echo=self.config.echo
             )
-            
+
             self.session_factory = sessionmaker(bind=self.engine)
             self.metadata = MetaData()
             self.metadata.reflect(bind=self.engine)
-            
+
             # Test connection
             with self.engine.connect() as conn:
                 result = conn.execute(text("SELECT 1")).fetchone()
                 logger.info(f"FinLab database connection established: {result}")
-                
+
+        except AuthenticationError as e:
+            self.auth_errors += 1
+            logger.error(f"Authentication failed during connection: {e}")
+            raise
         except SQLAlchemyError as e:
             logger.error(f"Failed to connect to FinLab database: {e}")
             raise
@@ -229,9 +306,68 @@ class FinLabConnector:
         if self.engine:
             self.engine.dispose()
             logger.info("FinLab database connection closed")
+
+    def validate_authentication(self) -> bool:
+        """Validate current authentication status."""
+        try:
+            if not self._authenticator:
+                logger.warning("No authenticator configured")
+                return False
+
+            if self._current_token:
+                if self._authenticator.validate_token(self._current_token):
+                    logger.debug("Current token is valid")
+                    return True
+                else:
+                    logger.warning("Current token is invalid or expired")
+                    self._current_token = None
+
+            # Try to get a fresh token
+            self._current_token = self._authenticator.get_token()
+            return self._authenticator.validate_token(self._current_token)
+
+        except AuthenticationError as e:
+            self.auth_errors += 1
+            logger.error(f"Authentication validation failed: {e}")
+            return False
+
+    def refresh_authentication(self) -> bool:
+        """Refresh authentication token if needed."""
+        try:
+            if not self._current_token or self._current_token.is_expired:
+                logger.info("Refreshing authentication token")
+                self._current_token = self._authenticator.get_token()
+                return True
+
+            return True
+
+        except AuthenticationError as e:
+            self.auth_errors += 1
+            logger.error(f"Authentication refresh failed: {e}")
+            return False
+
+    def _ensure_authenticated(self) -> None:
+        """Ensure we have valid authentication before proceeding."""
+        if self.config.has_token_auth:
+            if not self.validate_authentication():
+                raise AuthenticationError("Valid authentication required for this operation")
+
+    def get_auth_headers(self) -> Dict[str, str]:
+        """Get authentication headers for API requests."""
+        headers = {}
+
+        if self._current_token:
+            headers["Authorization"] = self._current_token.to_header()
+
+        if self.config.auth_config and self.config.auth_config.api_key:
+            headers["X-API-Key"] = self.config.auth_config.api_key
+
+        return headers
     
+    @require_auth
     def get_available_symbols(self, as_of_date: Optional[date] = None) -> List[str]:
         """Get list of available symbols in FinLab database."""
+        self._ensure_authenticated()
         try:
             with self.session_factory() as session:
                 # Query main price table for available symbols
@@ -252,8 +388,10 @@ class FinLabConnector:
             logger.error(f"Error querying available symbols: {e}")
             return []
     
+    @require_auth
     def get_symbol_info(self, symbol: str) -> Optional[Dict[str, Any]]:
         """Get metadata information for a symbol."""
+        self._ensure_authenticated()
         cache_key = f"info_{symbol}"
         
         if self.enable_cache and cache_key in self._metadata_cache:
@@ -292,12 +430,14 @@ class FinLabConnector:
         
         return None
     
-    def get_price_data(self, 
-                      symbol: str, 
+    @require_auth
+    def get_price_data(self,
+                      symbol: str,
                       start_date: date,
                       end_date: date,
                       fields: Optional[List[str]] = None) -> List[TemporalValue]:
         """Get historical price data for a symbol."""
+        self._ensure_authenticated()
         start_time = datetime.utcnow()
         
         if fields is None:
@@ -359,12 +499,14 @@ class FinLabConnector:
             logger.error(f"Error querying price data for {symbol}: {e}")
             return []
     
+    @require_auth
     def get_fundamental_data(self,
-                            symbol: str, 
+                            symbol: str,
                             start_date: date,
                             end_date: date,
                             fields: Optional[List[str]] = None) -> List[TemporalValue]:
         """Get fundamental data with proper reporting lag handling."""
+        self._ensure_authenticated()
         start_time = datetime.utcnow()
         
         if fields is None:
@@ -786,19 +928,32 @@ class FinLabConnector:
         return recommendations
     
     def get_performance_stats(self) -> Dict[str, Any]:
-        """Get connector performance statistics."""
+        """Get connector performance statistics including authentication metrics."""
         avg_query_time = self.total_query_time / max(self.query_count, 1)
         cache_hit_rate = self.cache_hits / max(self.query_count, 1) if self.enable_cache else 0
-        
-        return {
+        auth_error_rate = self.auth_errors / max(self.query_count, 1)
+
+        stats = {
             "query_count": self.query_count,
             "cache_hits": self.cache_hits,
             "cache_hit_rate": cache_hit_rate,
             "avg_query_time_seconds": avg_query_time,
             "total_query_time_seconds": self.total_query_time,
             "mapped_fields_count": len(self.field_mapping),
-            "cache_enabled": self.enable_cache
+            "cache_enabled": self.enable_cache,
+            "auth_errors": self.auth_errors,
+            "auth_error_rate": auth_error_rate,
+            "has_token_auth": self.config.has_token_auth,
+            "has_db_auth": self.config.has_db_auth,
+            "current_token_valid": bool(self._current_token and not self._current_token.is_expired)
         }
+
+        # Add authentication statistics if available
+        if self._authenticator:
+            auth_stats = self._authenticator.get_performance_stats()
+            stats.update({f"auth_{k}": v for k, v in auth_stats.items()})
+
+        return stats
     
     def clear_cache(self) -> None:
         """Clear all cached data."""
@@ -816,18 +971,24 @@ class FinLabConnector:
         self.disconnect()
 
 
-# Factory function for easy connector creation
+# Factory functions for easy connector creation
 def create_finlab_connector(
-    host: str = "localhost",
+    host: Optional[str] = None,
     port: int = 5432,
-    database: str = "finlab", 
-    username: str = "finlab",
+    database: str = "finlab",
+    username: Optional[str] = None,
     password: str = "",
     temporal_store: Optional[TemporalStore] = None,
+    auth_config: Optional[AuthConfig] = None,
     **kwargs
 ) -> FinLabConnector:
-    """Factory function to create FinLab connector with sensible defaults."""
+    """Factory function to create FinLab connector with enhanced authentication."""
+    # Create auth config first (will load from environment)
+    if auth_config is None:
+        auth_config = AuthConfig()
+
     config = FinLabConfig(
+        auth_config=auth_config,
         host=host,
         port=port,
         database=database,
@@ -835,9 +996,48 @@ def create_finlab_connector(
         password=password,
         **kwargs
     )
-    
+
     if temporal_store is None:
         from ..core.temporal import InMemoryTemporalStore
         temporal_store = InMemoryTemporalStore()
-    
+
+    return FinLabConnector(config, temporal_store)
+
+
+def create_finlab_connector_with_token(
+    token: str,
+    temporal_store: Optional[TemporalStore] = None,
+    **kwargs
+) -> FinLabConnector:
+    """Factory function to create FinLab connector with token authentication."""
+    auth_config = AuthConfig()
+    auth_config.finlab_token = token
+
+    config = FinLabConfig(auth_config=auth_config, **kwargs)
+
+    if temporal_store is None:
+        from ..core.temporal import InMemoryTemporalStore
+        temporal_store = InMemoryTemporalStore()
+
+    return FinLabConnector(config, temporal_store)
+
+
+def create_finlab_connector_from_env(
+    temporal_store: Optional[TemporalStore] = None,
+    config_file: Optional[str] = None,
+    **kwargs
+) -> FinLabConnector:
+    """Factory function to create FinLab connector loading configuration from environment."""
+    if config_file:
+        from .finlab_auth import load_auth_config_from_file
+        auth_config = load_auth_config_from_file(config_file)
+    else:
+        auth_config = AuthConfig()  # Will auto-load from environment
+
+    config = FinLabConfig(auth_config=auth_config, **kwargs)
+
+    if temporal_store is None:
+        from ..core.temporal import InMemoryTemporalStore
+        temporal_store = InMemoryTemporalStore()
+
     return FinLabConnector(config, temporal_store)

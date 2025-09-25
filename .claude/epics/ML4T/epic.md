@@ -1,11 +1,11 @@
 ---
 name: ML4T
-status: backlog
+status: in-progress
 created: 2025-09-21T16:44:05Z
-progress: 0%
+progress: 33%
 prd: .claude/prds/ML4T.md
 github: https://github.com/PaiCY-T/ML4T/issues/43
-updated: 2025-09-25T01:52:17Z
+updated: 2025-09-25T01:51:19Z
 ---
 
 # Epic: ML4T (Machine Learning for Trading MVP)

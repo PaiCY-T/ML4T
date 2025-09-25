@@ -43,22 +43,22 @@ for task_file in .claude/epics/$ARGUMENTS/[0-9]*.md; do
     
     # Try YAML frontmatter format first
     if grep -q '^---$' "$task_file"; then
-        status=$(sed -n '/^---$/,/^---$/{s/^status: *//p}' "$task_file" | head -1)
+        status=$(sed -n '/^---$/,/^---$/{s/^status: *//p}' "$task_file" | head -1 | tr -d '\r')
     fi
     
     # Try markdown code block format
     if [ -z "$status" ]; then
-        status=$(sed -n '/^```yaml$/,/^```$/{s/^status: *//p}' "$task_file" | head -1)
+        status=$(sed -n '/^```yaml$/,/^```$/{s/^status: *//p}' "$task_file" | head -1 | tr -d '\r')
     fi
     
     # Try **Status**: format
     if [ -z "$status" ]; then
-        status=$(grep -o '\*\*Status\*\*: *[a-z]*' "$task_file" | head -1 | cut -d: -f2 | tr -d ' ')
+        status=$(grep -o '\*\*Status\*\*: *[a-z]*' "$task_file" | head -1 | cut -d: -f2 | tr -d ' \r')
     fi
     
     # Try plain status: format
     if [ -z "$status" ]; then
-        status=$(grep "^status:" "$task_file" | head -1 | cut -d: -f2 | tr -d ' ')
+        status=$(grep "^status:" "$task_file" | head -1 | cut -d: -f2 | tr -d ' \r')
     fi
     
     case "$status" in
