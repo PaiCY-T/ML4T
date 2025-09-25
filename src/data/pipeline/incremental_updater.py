@@ -26,8 +26,132 @@ from ..models.taiwan_market import (
     TaiwanMarketDataValidator, create_taiwan_trading_calendar
 )
 from ..ingestion.finlab_connector import FinLabConnector, FinLabConfig
+from .finlab_dataset_config import FinLabDatasetConfig, FinLabField, DatasetUpdateStrategy
+from .data_validation import DataValidator, ValidationReport
+from .monitoring import pipeline_monitor, monitor_performance, AlertLevel
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class RetryConfig:
+    """Configuration for retry logic."""
+    max_attempts: int = 3
+    base_delay: float = 1.0
+    max_delay: float = 60.0
+    exponential_base: float = 2.0
+    jitter: bool = True
+
+    def get_delay(self, attempt: int) -> float:
+        """Calculate delay for retry attempt."""
+        delay = min(self.base_delay * (self.exponential_base ** attempt), self.max_delay)
+        if self.jitter:
+            import random
+            delay *= (0.5 + random.random() * 0.5)  # Add 0-50% jitter
+        return delay
+
+
+@dataclass
+class ErrorContext:
+    """Context information for error recovery."""
+    error_type: str
+    error_message: str
+    symbol: Optional[str] = None
+    data_type: Optional[DataType] = None
+    timestamp: datetime = field(default_factory=datetime.utcnow)
+    retry_count: int = 0
+    recoverable: bool = True
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+class ErrorRecoveryManager:
+    """Manages error recovery strategies and patterns."""
+
+    def __init__(self):
+        self.error_history: Dict[str, List[ErrorContext]] = defaultdict(list)
+        self.recovery_strategies = {
+            "ConnectionError": self._handle_connection_error,
+            "AuthenticationError": self._handle_auth_error,
+            "DataValidationError": self._handle_validation_error,
+            "RateLimitError": self._handle_rate_limit_error,
+            "TimeoutError": self._handle_timeout_error
+        }
+
+    def should_retry(self, error_context: ErrorContext, max_retries: int = 3) -> bool:
+        """Determine if an error should be retried."""
+        if not error_context.recoverable:
+            return False
+
+        if error_context.retry_count >= max_retries:
+            return False
+
+        # Check error patterns for this symbol/type combination
+        key = f"{error_context.symbol}_{error_context.data_type}"
+        recent_errors = [
+            e for e in self.error_history[key]
+            if (datetime.utcnow() - e.timestamp).total_seconds() < 3600  # Last hour
+        ]
+
+        # Don't retry if too many recent errors for same symbol/type
+        if len(recent_errors) > 5:
+            return False
+
+        return True
+
+    def record_error(self, error_context: ErrorContext) -> None:
+        """Record error for pattern analysis."""
+        key = f"{error_context.symbol}_{error_context.data_type}"
+        self.error_history[key].append(error_context)
+
+        # Keep only recent errors (last 24 hours)
+        cutoff = datetime.utcnow() - timedelta(hours=24)
+        self.error_history[key] = [
+            e for e in self.error_history[key] if e.timestamp >= cutoff
+        ]
+
+    def get_recovery_strategy(self, error_type: str) -> Optional[Callable]:
+        """Get recovery strategy for error type."""
+        return self.recovery_strategies.get(error_type)
+
+    def _handle_connection_error(self, error_context: ErrorContext) -> Dict[str, Any]:
+        """Handle connection errors."""
+        return {
+            "action": "retry",
+            "delay": 5.0 * (error_context.retry_count + 1),
+            "max_retries": 3
+        }
+
+    def _handle_auth_error(self, error_context: ErrorContext) -> Dict[str, Any]:
+        """Handle authentication errors."""
+        return {
+            "action": "refresh_auth",
+            "delay": 2.0,
+            "max_retries": 2
+        }
+
+    def _handle_validation_error(self, error_context: ErrorContext) -> Dict[str, Any]:
+        """Handle validation errors."""
+        return {
+            "action": "skip_and_log",
+            "delay": 0.0,
+            "max_retries": 0  # Don't retry validation errors
+        }
+
+    def _handle_rate_limit_error(self, error_context: ErrorContext) -> Dict[str, Any]:
+        """Handle rate limiting errors."""
+        return {
+            "action": "retry",
+            "delay": 60.0 * (error_context.retry_count + 1),  # Longer delays for rate limits
+            "max_retries": 5
+        }
+
+    def _handle_timeout_error(self, error_context: ErrorContext) -> Dict[str, Any]:
+        """Handle timeout errors."""
+        return {
+            "action": "retry",
+            "delay": 10.0 * (error_context.retry_count + 1),
+            "max_retries": 2
+        }
 
 
 class UpdateMode(Enum):
@@ -245,37 +369,79 @@ class TemporalConsistencyChecker:
 
 
 class IncrementalUpdater:
-    """High-performance incremental data updater with temporal consistency."""
-    
+    """Enhanced incremental data updater with comprehensive FinLab support.
+
+    Features:
+    - Comprehensive FinLab dataset support with 278+ fields
+    - Robust error handling and automatic recovery
+    - Real-time performance monitoring and alerting
+    - Advanced data validation and quality checks
+    - Optimized batch processing with configurable strategies
+    - Temporal consistency validation with settlement rules
+    - Configurable retry logic with exponential backoff
+    - Integration with authentication and validation frameworks
+    """
+
     def __init__(self,
                  temporal_store: TemporalStore,
                  finlab_connector: FinLabConnector,
                  trading_calendar: Optional[Dict[date, TaiwanTradingCalendar]] = None,
                  max_workers: int = 4,
-                 enable_queue: bool = True):
-        
+                 enable_queue: bool = True,
+                 config_file: Optional[Path] = None,
+                 enable_monitoring: bool = True,
+                 enable_validation: bool = True):
+
         self.temporal_store = temporal_store
         self.finlab_connector = finlab_connector
         self.trading_calendar = trading_calendar or create_taiwan_trading_calendar(2024)
         self.max_workers = max_workers
-        
-        # Update tracking
+
+        # Enhanced configuration management
+        self.dataset_config = FinLabDatasetConfig()
+        self.update_strategy = DatasetUpdateStrategy(self.dataset_config)
+        self.field_configs = self.dataset_config.get_all_fields()
+
+        # Data validation framework
+        self.data_validator = DataValidator() if enable_validation else None
+        self.enable_validation = enable_validation
+
+        # Monitoring and alerting
+        self.enable_monitoring = enable_monitoring
+        if enable_monitoring:
+            self.monitor = pipeline_monitor
+            self.monitor.update_component_status("incremental_updater", "initializing", "Starting up...")
+
+        # Update tracking with enhanced checkpointing
         self.checkpoints: Dict[Tuple[str, DataType], DataCheckpoint] = {}
         self.update_queue = UpdateQueue() if enable_queue else None
-        
+        self.checkpoint_file = config_file.parent / "checkpoints.json" if config_file else Path("checkpoints.json")
+
         # Consistency checking
         self.consistency_checker = TemporalConsistencyChecker(self.trading_calendar)
-        
-        # Performance metrics
+
+        # Enhanced error handling and recovery
+        self.error_recovery = ErrorRecoveryManager()
+        self.retry_config = RetryConfig()
+
+        # Performance metrics (enhanced)
         self.update_count = 0
         self.total_processing_time = 0.0
         self.error_count = 0
-        
+        self.validation_reports: List[ValidationReport] = []
+        self.performance_history = deque(maxlen=1000)
+
         # Background processing
         self._stop_event = threading.Event()
         self._worker_thread = None
-        
-        logger.info("Incremental updater initialized")
+
+        # Load checkpoints and initialize
+        self._load_checkpoints()
+
+        if self.enable_monitoring:
+            self.monitor.update_component_status("incremental_updater", "healthy", "Initialized successfully")
+
+        logger.info(f"Enhanced incremental updater initialized with {len(self.field_configs)} field configurations")
     
     def start_background_processing(self) -> None:
         """Start background update processing thread."""
@@ -364,37 +530,75 @@ class IncrementalUpdater:
         
         return result
     
-    def _execute_incremental_update(self, 
-                                   request: UpdateRequest, 
+    def _execute_incremental_update(self,
+                                   request: UpdateRequest,
                                    result: UpdateResult) -> None:
-        """Execute incremental update using enhanced batch processing."""
-        
-        # Use optimized batch processing for better performance
-        if len(request.symbols) > 20:  # Use batch processing for larger requests
-            self._batch_process_symbols(request.symbols, request, result)
-        else:
-            # Use parallel processing for smaller requests
-            self._parallel_process_symbols(request.symbols, request, result)
+        """Execute incremental update with comprehensive error handling and monitoring."""
+
+        if self.enable_monitoring:
+            self.monitor.performance_tracker.start_timer("incremental_update")
+
+        try:
+            # Enhanced processing strategy selection
+            if len(request.symbols) > 50:  # Large batch processing
+                self._execute_large_batch_update(request, result)
+            elif len(request.symbols) > 20:  # Medium batch processing
+                self._execute_medium_batch_update(request, result)
+            else:
+                # Parallel processing for smaller requests
+                self._parallel_process_symbols_enhanced(request.symbols, request, result)
+
+            # Save checkpoints after successful update
+            self._save_checkpoints()
+
+        except Exception as e:
+            logger.error(f"Incremental update execution failed: {e}")
+            result.errors.append(f"Update execution error: {str(e)}")
+
+            if self.enable_monitoring:
+                self.monitor.alert_manager.raise_alert(
+                    AlertLevel.ERROR,
+                    "Incremental update execution failed",
+                    str(e),
+                    "incremental_updater",
+                    {"symbols_count": len(request.symbols), "error": str(e)}
+                )
+
+        finally:
+            if self.enable_monitoring:
+                duration = self.monitor.performance_tracker.end_timer("incremental_update")
+                self.monitor.track_update_operation(
+                    "batch" if len(request.symbols) > 1 else request.symbols[0],
+                    result.processed_count,
+                    duration,
+                    result.error_count
+                )
     
-    def _parallel_process_symbols(self, 
-                                 symbols: List[str],
-                                 request: UpdateRequest,
-                                 result: UpdateResult) -> None:
-        """Process symbols in parallel for smaller requests."""
-        
-        # Execute updates in parallel
+    def _parallel_process_symbols_enhanced(self,
+                                          symbols: List[str],
+                                          request: UpdateRequest,
+                                          result: UpdateResult) -> None:
+        """Process symbols in parallel with enhanced error handling."""
+
+        # Execute updates in parallel with enhanced monitoring
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            futures = [
-                executor.submit(self._update_single_symbol, symbol, request) 
+            futures = {
+                executor.submit(self._update_single_symbol_with_validation, symbol, request): symbol
                 for symbol in symbols
-            ]
-            
+            }
+
             for future in as_completed(futures):
-                new_cnt, updated_cnt, errors = future.result()
-                result.new_count += new_cnt
-                result.updated_count += updated_cnt
-                result.errors.extend(errors)
-                result.processed_count += 1
+                symbol = futures[future]
+                try:
+                    new_cnt, updated_cnt, errors = future.result(timeout=300)  # 5-minute timeout
+                    result.new_count += new_cnt
+                    result.updated_count += updated_cnt
+                    result.errors.extend(errors)
+                    result.processed_count += 1
+                except Exception as e:
+                    logger.error(f"Parallel processing failed for symbol {symbol}: {e}")
+                    result.errors.append(f"Parallel processing error for {symbol}: {e}")
+                    result.error_count += 1
     
     def _execute_full_refresh(self, 
                              request: UpdateRequest,
@@ -777,6 +981,231 @@ class IncrementalUpdater:
         }
         
         return stats
+
+    def _fetch_data_with_enhanced_retry(self,
+                                       symbol: str,
+                                       data_type: DataType,
+                                       start_date: date,
+                                       end_date: date) -> List[TemporalValue]:
+        """Fetch data with enhanced retry logic and recovery."""
+        for attempt in range(self.retry_config.max_attempts):
+            try:
+                if data_type == DataType.PRICE:
+                    return self.finlab_connector.get_price_data(symbol, start_date, end_date)
+                elif data_type == DataType.FUNDAMENTAL:
+                    return self.finlab_connector.get_fundamental_data(symbol, start_date, end_date)
+                elif data_type == DataType.CORPORATE_ACTION:
+                    return self.finlab_connector.get_corporate_actions(symbol, start_date, end_date)
+                else:
+                    return []
+            except Exception as e:
+                if attempt == self.retry_config.max_attempts - 1:
+                    raise e
+
+                # Log retry attempt
+                logger.warning(f"Enhanced data fetch attempt {attempt + 1} failed for {symbol}: {e}")
+
+                # Apply enhanced delay strategy
+                delay = self.retry_config.get_delay(attempt)
+                time.sleep(delay)
+
+        return []
+
+    def _process_and_validate_with_context(self,
+                                         values: List[TemporalValue],
+                                         field_configs: Dict[str, FinLabField],
+                                         request: UpdateRequest,
+                                         errors: List[str]) -> List[TemporalValue]:
+        """Process and validate temporal values with enhanced context."""
+        processed_values = []
+
+        for value in values:
+            field_name = value.metadata.get("field", "unknown")
+            field_config = field_configs.get(field_name)
+
+            if not field_config:
+                errors.append(f"Unknown field configuration for {field_name}")
+                continue
+
+            # Enhanced temporal consistency validation
+            if request.validate_consistency:
+                consistency_issues = self._enhanced_consistency_check_with_context(value, field_config)
+                if consistency_issues:
+                    errors.extend(consistency_issues)
+                    # Still process but with warnings
+
+            # Data quality validation with field-specific rules
+            quality_issues = self._validate_data_quality_with_field_config(value, field_config)
+            if quality_issues:
+                # Critical issues block processing, others just log
+                critical_issues = [issue for issue in quality_issues if "critical" in issue.lower()]
+                if critical_issues:
+                    errors.extend(critical_issues)
+                    continue
+                else:
+                    errors.extend(quality_issues)  # Log non-critical issues
+
+            processed_values.append(value)
+
+        return processed_values
+
+    def _enhanced_consistency_check_with_context(self,
+                                               value: TemporalValue,
+                                               field_config: FinLabField) -> List[str]:
+        """Enhanced temporal consistency checking with field context."""
+        issues = []
+
+        # Check expected data lag against field configuration
+        expected_lag = timedelta(days=field_config.lag_days)
+        actual_lag = value.as_of_date - value.value_date
+
+        if actual_lag < timedelta(days=0):
+            issues.append(f"CRITICAL: as_of_date {value.as_of_date} is before value_date {value.value_date}")
+
+        # Allow some flexibility but flag significant deviations
+        max_expected_lag = expected_lag + timedelta(days=3)  # 3-day buffer
+        if actual_lag > max_expected_lag:
+            issues.append(f"Data lag {actual_lag.days} days exceeds expected {field_config.lag_days} days for {field_config.name}")
+
+        # Check for reasonable value ranges based on field type
+        if field_config.temporal_type == DataType.PRICE and isinstance(value.value, (int, float)):
+            price = float(value.value)
+            if price <= 0:
+                issues.append(f"CRITICAL: Invalid price value: {price} <= 0")
+            elif price > 10000:  # Taiwan stock price upper bound
+                issues.append(f"Unusually high price value: {price} for Taiwan market")
+
+        return issues
+
+    def _validate_data_quality_with_field_config(self,
+                                                value: TemporalValue,
+                                                field_config: FinLabField) -> List[str]:
+        """Validate data quality with field-specific configuration."""
+        issues = []
+
+        # Check for null values
+        if value.value is None:
+            if field_config.required:
+                issues.append(f"CRITICAL: Null value for required field {field_config.name}")
+            else:
+                issues.append(f"Null value for optional field {field_config.name}")
+            return issues
+
+        # Type validation
+        expected_type = field_config.data_type
+        if expected_type == "float" and not isinstance(value.value, (int, float, Decimal)):
+            issues.append(f"CRITICAL: Expected float for {field_config.name}, got {type(value.value).__name__}")
+        elif expected_type == "int" and not isinstance(value.value, int):
+            issues.append(f"CRITICAL: Expected int for {field_config.name}, got {type(value.value).__name__}")
+
+        # Field-specific validation rules
+        if field_config.validation_rules:
+            for rule_name, rule_value in field_config.validation_rules.items():
+                if rule_name == "min_value" and isinstance(value.value, (int, float)):
+                    if float(value.value) < rule_value:
+                        issues.append(f"Value {value.value} below minimum {rule_value} for {field_config.name}")
+                elif rule_name == "max_value" and isinstance(value.value, (int, float)):
+                    if float(value.value) > rule_value:
+                        issues.append(f"Value {value.value} above maximum {rule_value} for {field_config.name}")
+
+        return issues
+
+    def _store_values_with_monitoring(self,
+                                    values: List[TemporalValue],
+                                    symbol: str,
+                                    data_type: DataType) -> Tuple[int, int]:
+        """Store values with performance monitoring."""
+        if not values:
+            return 0, 0
+
+        if self.enable_monitoring:
+            self.monitor.performance_tracker.start_timer(f"store_values_{data_type.value}")
+
+        try:
+            new_count, updated_count = self._store_values_efficiently(values, symbol, data_type)
+
+            if self.enable_monitoring:
+                self.monitor.performance_tracker.record_counter(
+                    "values_stored",
+                    len(values),
+                    {"symbol": symbol, "data_type": data_type.value}
+                )
+
+            return new_count, updated_count
+
+        finally:
+            if self.enable_monitoring:
+                self.monitor.performance_tracker.end_timer(
+                    f"store_values_{data_type.value}",
+                    {"symbol": symbol, "count": len(values)}
+                )
+
+    def _update_checkpoint_with_validation(self,
+                                         symbol: str,
+                                         data_type: DataType,
+                                         last_date: date) -> None:
+        """Update checkpoint with validation and monitoring."""
+        try:
+            checkpoint_key = (symbol, data_type)
+
+            # Generate hash for data integrity validation
+            hash_data = f"{symbol}_{data_type.value}_{last_date.isoformat()}"
+            hash_value = hashlib.md5(hash_data.encode()).hexdigest()
+
+            checkpoint = DataCheckpoint(
+                symbol=symbol,
+                data_type=data_type,
+                last_update_date=last_date,
+                last_update_timestamp=datetime.utcnow(),
+                hash_value=hash_value,
+                version=2  # Enhanced checkpoint version
+            )
+
+            self.checkpoints[checkpoint_key] = checkpoint
+
+            logger.debug(f"Updated checkpoint for {symbol} {data_type} to {last_date}")
+
+        except Exception as e:
+            logger.error(f"Failed to update checkpoint for {symbol} {data_type}: {e}")
+
+    def get_comprehensive_status(self) -> Dict[str, Any]:
+        """Get comprehensive status including all enhancements."""
+        base_stats = self.get_performance_stats()
+
+        # Add enhanced metrics
+        enhanced_stats = {
+            "dataset_config": {
+                "total_fields": len(self.field_configs),
+                "field_types": {
+                    "etl": len([f for f in self.field_configs.values() if f.dataset_type.value == "etl"]),
+                    "financial_statement": len([f for f in self.field_configs.values() if f.dataset_type.value == "financial_statement"]),
+                    "fundamental_features": len([f for f in self.field_configs.values() if f.dataset_type.value == "fundamental_features"])
+                }
+            },
+            "validation": {
+                "enabled": self.enable_validation,
+                "reports_generated": len(self.validation_reports),
+                "last_report_date": self.validation_reports[-1].validation_date.isoformat() if self.validation_reports else None
+            },
+            "monitoring": {
+                "enabled": self.enable_monitoring,
+                "performance_history_size": len(self.performance_history)
+            },
+            "error_recovery": {
+                "retry_config": {
+                    "max_attempts": self.retry_config.max_attempts,
+                    "base_delay": self.retry_config.base_delay,
+                    "max_delay": self.retry_config.max_delay
+                },
+                "error_patterns": len(self.error_recovery.error_history)
+            },
+            "checkpoints": {
+                "file_path": str(self.checkpoint_file),
+                "persistent_storage": self.checkpoint_file.exists()
+            }
+        }
+
+        return {**base_stats, **enhanced_stats}
     
     def create_daily_update_request(self,
                                    symbols: List[str],
