@@ -1,0 +1,42 @@
+[
+  {
+    "dataset_name": "clean_finlab_dataset",
+    "source_system": "finlab",
+    "extraction_method": "etl",
+    "extraction_timestamp": "2025-09-25T19:11:42.180150",
+    "data_hash": "12593d541e0c4aa79ff5baac728c721f",
+    "row_count": 90,
+    "column_count": 13,
+    "file_size": null,
+    "transformation_steps": [],
+    "quality_score": 92.72727272727272
+  },
+  {
+    "dataset_name": "demo_finlab_dataset",
+    "source_system": "finlab_api",
+    "extraction_method": "daily_batch",
+    "extraction_timestamp": "2025-09-25T19:11:42.258566",
+    "data_hash": "12593d541e0c4aa79ff5baac728c721f",
+    "row_count": 90,
+    "column_count": 13,
+    "file_size": null,
+    "transformation_steps": [
+      "cleaning",
+      "validation",
+      "enrichment"
+    ],
+    "quality_score": 85.5
+  },
+  {
+    "dataset_name": "problematic_finlab_dataset",
+    "source_system": "finlab",
+    "extraction_method": "etl",
+    "extraction_timestamp": "2025-09-25T19:11:42.319641",
+    "data_hash": "b56aa090a633e9a57bf4ad7c04d17d81",
+    "row_count": 90,
+    "column_count": 13,
+    "file_size": null,
+    "transformation_steps": [],
+    "quality_score": 68.66452991452991
+  }
+]

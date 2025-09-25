@@ -1,0 +1,156 @@
+{
+  "dataset_name": "clean_finlab_dataset",
+  "report_timestamp": "2025-09-25T19:12:07.328537",
+  "summary": {
+    "total_checks": 13,
+    "passed_checks": 10,
+    "failed_checks": 3,
+    "pass_rate": 76.92307692307693
+  },
+  "quality_metrics": {
+    "completeness": 100.0,
+    "accuracy": 90.9090909090909,
+    "consistency": 100,
+    "validity": 100,
+    "uniqueness": 100,
+    "timeliness": 0,
+    "overall": 92.72727272727272
+  },
+  "results_by_severity": {
+    "critical": 0,
+    "high": 1,
+    "medium": 2,
+    "low": 0,
+    "info": 10
+  },
+  "validation_results": [
+    {
+      "field_name": "adj_close",
+      "check_name": "data_type_check",
+      "severity": "info",
+      "passed": true,
+      "message": "Data type validation passed",
+      "details": null,
+      "timestamp": "2025-09-25T19:12:07.293506"
+    },
+    {
+      "field_name": "adj_high",
+      "check_name": "data_type_check",
+      "severity": "info",
+      "passed": true,
+      "message": "Data type validation passed",
+      "details": null,
+      "timestamp": "2025-09-25T19:12:07.293727"
+    },
+    {
+      "field_name": "adj_low",
+      "check_name": "data_type_check",
+      "severity": "info",
+      "passed": true,
+      "message": "Data type validation passed",
+      "details": null,
+      "timestamp": "2025-09-25T19:12:07.294004"
+    },
+    {
+      "field_name": "adj_open",
+      "check_name": "data_type_check",
+      "severity": "info",
+      "passed": true,
+      "message": "Data type validation passed",
+      "details": null,
+      "timestamp": "2025-09-25T19:12:07.294169"
+    },
+    {
+      "field_name": "\u4fdd\u7559\u76c8\u9918",
+      "check_name": "data_type_check",
+      "severity": "info",
+      "passed": true,
+      "message": "Data type validation passed",
+      "details": null,
+      "timestamp": "2025-09-25T19:12:07.294510"
+    },
+    {
+      "field_name": "\u4e0d\u52d5\u7522\u5ee0\u623f\u53ca\u8a2d\u5099",
+      "check_name": "data_type_check",
+      "severity": "info",
+      "passed": true,
+      "message": "Data type validation passed",
+      "details": null,
+      "timestamp": "2025-09-25T19:12:07.294645"
+    },
+    {
+      "field_name": "\u4f7f\u7528\u6b0a\u8cc7\u7522",
+      "check_name": "data_type_check",
+      "severity": "info",
+      "passed": true,
+      "message": "Data type validation passed",
+      "details": null,
+      "timestamp": "2025-09-25T19:12:07.294767"
+    },
+    {
+      "field_name": "\u4e00\u5e74\u5167\u5230\u671f\u9577\u671f\u8ca0\u50b5",
+      "check_name": "data_type_check",
+      "severity": "info",
+      "passed": true,
+      "message": "Data type validation passed",
+      "details": null,
+      "timestamp": "2025-09-25T19:12:07.294891"
+    },
+    {
+      "field_name": "\u505c\u696d\u55ae\u4f4d\u640d\u76ca",
+      "check_name": "data_type_check",
+      "severity": "info",
+      "passed": true,
+      "message": "Data type validation passed",
+      "details": null,
+      "timestamp": "2025-09-25T19:12:07.295071"
+    },
+    {
+      "field_name": "\u505c\u696d\u55ae\u4f4d\u640d\u76ca",
+      "check_name": "min_value_check",
+      "severity": "medium",
+      "passed": false,
+      "message": "Found 54 values below minimum 0.0",
+      "details": {
+        "violation_count": 54,
+        "min_value": 0.0
+      },
+      "timestamp": "2025-09-25T19:12:07.295171"
+    },
+    {
+      "field_name": "\u511f\u9084\u516c\u53f8\u50b5",
+      "check_name": "data_type_check",
+      "severity": "info",
+      "passed": true,
+      "message": "Data type validation passed",
+      "details": null,
+      "timestamp": "2025-09-25T19:12:07.295259"
+    },
+    {
+      "field_name": "date",
+      "check_name": "data_staleness",
+      "severity": "high",
+      "passed": false,
+      "message": "Latest data is 909 days old, exceeds threshold of 30 days",
+      "details": {
+        "days_old": 909,
+        "latest_date": "2023-03-31T00:00:00"
+      },
+      "timestamp": "2025-09-25T19:12:07.296391"
+    },
+    {
+      "field_name": "adj_high",
+      "check_name": "statistical_outliers",
+      "severity": "medium",
+      "passed": false,
+      "message": "Found outliers: 0 (Z-score), 2 (IQR)",
+      "details": {
+        "z_score_outliers": 0,
+        "iqr_outliers": 2,
+        "total_records": 90,
+        "outlier_percentage": 2.2222222222222223
+      },
+      "timestamp": "2025-09-25T19:12:07.305667"
+    }
+  ]
+}
