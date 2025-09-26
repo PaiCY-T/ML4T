@@ -29,10 +29,11 @@ pympler>=0.9
 # Data validation
 cerberus>=1.3.4
 
-# CLI interface dependencies - Issue #58
+# CLI interface dependencies - Issue #58, #65
 click>=8.0.0
 rich>=12.0.0
 typer>=0.7.0
+pyyaml>=6.0.0
 
 # Database and API clients
 sqlalchemy>=1.4.0

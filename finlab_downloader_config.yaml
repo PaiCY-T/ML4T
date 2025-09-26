@@ -1,0 +1,65 @@
+# FinLab Data Downloader Configuration
+# This is a sample configuration file for the FinLab data downloader
+
+version: "1.0"
+
+# General settings
+general:
+  data_directory: "./data/finlab"
+  cache_directory: "./cache/finlab"
+  log_level: INFO
+  log_file: "finlab_downloader.log"
+  max_workers: 4
+  request_timeout: 30
+  retry_attempts: 3
+  retry_delay: 1.0
+
+# Data source configurations
+data_sources:
+  # Example FinLab API source (placeholder)
+  finlab_api:
+    type: "finlab_api"
+    base_url: "https://api.finlab.tw"
+    api_key: "${FINLAB_API_KEY}"  # Environment variable
+    rate_limit: 60  # requests per minute
+    timeout: 30
+    enabled: true
+
+  # Example CSV file source
+  csv_files:
+    type: "csv"
+    directory: "./data/csv"
+    file_pattern: "*.csv"
+    date_column: "date"
+    symbol_column: "symbol"
+    enabled: false
+
+  # Example database source (placeholder)
+  database:
+    type: "database"
+    connection_string: "postgresql://user:pass@localhost/finlab"
+    table_name: "stock_prices"
+    enabled: false
+
+# Logging configuration
+logging:
+  level: INFO
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  file_rotation:
+    max_bytes: 10485760  # 10MB
+    backup_count: 5
+  console_output: true
+
+# Cache configuration
+cache:
+  enabled: true
+  type: "memory"
+  ttl: 3600  # 1 hour
+  max_size: 1000
+
+# Validation settings
+validation:
+  strict_mode: false
+  check_duplicates: true
+  validate_dates: true
+  max_date_gap: 365  # days
