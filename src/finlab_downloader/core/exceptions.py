@@ -53,11 +53,15 @@ class ConfigurationError(FinLabDownloaderError):
         if field:
             context['field'] = field
 
+        # Filter out known kwargs before passing to parent
+        filtered_kwargs = {k: v for k, v in kwargs.items()
+                          if k in ['cause', 'context']}
+
         super().__init__(
             message,
             error_code="CONFIG_ERROR",
             context=context,
-            **kwargs
+            **filtered_kwargs
         )
 
 
@@ -107,11 +111,15 @@ class ValidationError(FinLabDownloaderError):
         if expected:
             context['expected'] = expected
 
+        # Filter out known kwargs before passing to parent
+        filtered_kwargs = {k: v for k, v in kwargs.items()
+                          if k in ['cause', 'context']}
+
         super().__init__(
             message,
             error_code="VALIDATION_ERROR",
             context=context,
-            **kwargs
+            **filtered_kwargs
         )
 
 
