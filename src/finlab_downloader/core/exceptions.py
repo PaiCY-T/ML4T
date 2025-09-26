@@ -177,3 +177,27 @@ class FileOperationError(FinLabDownloaderError):
             context=context,
             **kwargs
         )
+
+
+class SchedulingError(FinLabDownloaderError):
+    """Raised when scheduling operations fail."""
+
+    def __init__(
+        self,
+        message: str,
+        schedule_id: Optional[str] = None,
+        company_ticker: Optional[str] = None,
+        **kwargs
+    ):
+        context = kwargs.get('context', {})
+        if schedule_id:
+            context['schedule_id'] = schedule_id
+        if company_ticker:
+            context['company_ticker'] = company_ticker
+
+        super().__init__(
+            message,
+            error_code="SCHEDULING_ERROR",
+            context=context,
+            **kwargs
+        )
