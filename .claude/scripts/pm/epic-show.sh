@@ -54,7 +54,7 @@ for task_file in "$epic_dir"/[0-9]*.md; do
 
   task_num=$(basename "$task_file" .md)
   task_name=$(grep "^name:" "$task_file" | head -1 | sed 's/^name: *//')
-  task_status=$(grep "^status:" "$task_file" | head -1 | sed 's/^status: *//')
+  task_status=$(grep "^status:" "$task_file" | head -1 | sed 's/^status: *//' | tr -d '\r\n')
   parallel=$(grep "^parallel:" "$task_file" | head -1 | sed 's/^parallel: *//')
 
   if [ "$task_status" = "closed" ] || [ "$task_status" = "completed" ]; then

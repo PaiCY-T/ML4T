@@ -20,15 +20,86 @@ from rich.traceback import install
 install(show_locals=True)
 
 # Import command groups
-from .commands.pipeline import pipeline_group
-from .commands.validation import validation_group
-from .commands.monitoring import monitoring_group
-from .commands.data import data_group
-from .commands.config import config_group
-from .commands.batch import batch_group
-from .commands.troubleshoot import troubleshoot_group
-from .utils.logging import setup_logging, get_log_level
-from .utils.config import load_cli_config, CliConfig
+try:
+    from .commands.pipeline import pipeline_group
+    from .commands.validation import validation_group
+    from .commands.monitoring import monitoring_group
+    from .commands.data import data_group
+    from .commands.config import config_group
+    from .commands.batch import batch_group
+    from .commands.troubleshoot import troubleshoot_group
+    from .utils.logging import setup_logging, get_log_level
+    from .utils.config import load_cli_config, CliConfig
+except ImportError:
+    # Fallback to absolute imports when run as script
+    try:
+        from cli.commands.pipeline import pipeline_group
+        from cli.commands.validation import validation_group
+        from cli.commands.monitoring import monitoring_group
+        from cli.commands.data import data_group
+        from cli.commands.config import config_group
+        from cli.commands.batch import batch_group
+        from cli.commands.troubleshoot import troubleshoot_group
+        from cli.utils.logging import setup_logging, get_log_level
+        from cli.utils.config import load_cli_config, CliConfig
+    except ImportError:
+        # Final fallback - create minimal stubs
+        print("Warning: Some CLI modules not available, using minimal implementation")
+
+        @click.group()
+        def pipeline_group():
+            """Pipeline commands (limited functionality)."""
+            pass
+
+        @click.group()
+        def validation_group():
+            """Validation commands (limited functionality)."""
+            pass
+
+        @click.group()
+        def monitoring_group():
+            """Monitoring commands (limited functionality)."""
+            pass
+
+        @click.group()
+        def data_group():
+            """Data commands (limited functionality)."""
+            pass
+
+        @click.group()
+        def config_group():
+            """Config commands (limited functionality)."""
+            pass
+
+        @click.group()
+        def batch_group():
+            """Batch commands (limited functionality)."""
+            pass
+
+        @click.group()
+        def troubleshoot_group():
+            """Troubleshoot commands (limited functionality)."""
+            pass
+
+        def setup_logging(level, log_file, no_color):
+            logging.basicConfig(level=level)
+
+        def get_log_level(verbose, quiet):
+            if quiet:
+                return logging.ERROR
+            elif verbose >= 2:
+                return logging.DEBUG
+            elif verbose >= 1:
+                return logging.INFO
+            else:
+                return logging.WARNING
+
+        class CliConfig:
+            def __init__(self):
+                self.config_file = None
+
+        def load_cli_config(config_file):
+            return CliConfig()
 
 console = Console()
 logger = logging.getLogger(__name__)
@@ -100,7 +171,13 @@ def cli(ctx, verbose: int, quiet: bool, config_file: Optional[str],
 @click.pass_context
 def version(ctx):
     """Show version information."""
-    from .. import __version__
+    try:
+        from .. import __version__
+    except ImportError:
+        try:
+            from src import __version__
+        except ImportError:
+            __version__ = "1.0.0"
     console = ctx.obj['console']
     console.print(f"FinLab CLI version {__version__}")
 

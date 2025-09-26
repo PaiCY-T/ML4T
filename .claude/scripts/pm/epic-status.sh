@@ -50,7 +50,7 @@ else
     [ -f "$task_file" ] || continue
     ((total++))
 
-    task_status=$(grep "^status:" "$task_file" | head -1 | sed 's/^status: *//')
+    task_status=$(grep "^status:" "$task_file" | head -1 | sed 's/^status: *//' | tr -d '\r\n')
     deps=$(grep "^depends_on:" "$task_file" | head -1 | sed 's/^depends_on: *\[//' | sed 's/\]//')
 
     if [ "$task_status" = "closed" ] || [ "$task_status" = "completed" ]; then

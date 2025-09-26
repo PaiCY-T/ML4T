@@ -18,9 +18,9 @@ from rich.table import Table
 
 from ...data.ingestion.finlab_connector import FinLabConnector, FinLabConfig
 from ...data.ingestion.finlab_auth import create_finlab_authenticator
-from ...data.pipeline.incremental_updater import IncrementalUpdater, UpdateConfig, UpdateMode
+from ...data.pipeline.incremental_updater import IncrementalUpdater, UpdateMode
 from ...data.pipeline.finlab_dataset_config import FinLabDatasetConfig
-from ...data.core.temporal import DataType, is_taiwan_trading_day, get_previous_trading_day
+from ...data.core.temporal import DataType, is_taiwan_trading_day, get_previous_trading_day, TemporalDataManager, InMemoryTemporalStore
 from ...data.pipeline.data_validation import DataValidator
 from ..utils.formatting import format_table, format_status, format_bytes, format_timestamp, format_duration
 from ..utils.errors import DataError, AuthenticationError, handle_cli_error
@@ -61,7 +61,9 @@ def sync(ctx, symbols: Optional[str], datasets: Optional[str], start_date: Optio
             raise AuthenticationError("No authentication configured")
 
         config = FinLabConfig(auth_config=auth.config)
-        connector = FinLabConnector(config)
+        temporal_store = InMemoryTemporalStore()
+        temporal_manager = TemporalDataManager(temporal_store)
+        connector = FinLabConnector(config, temporal_store)
 
         # Test connection
         with console.status("[blue]Testing connection..."):
@@ -95,16 +97,13 @@ def sync(ctx, symbols: Optional[str], datasets: Optional[str], start_date: Optio
         if dry_run:
             console.print("[yellow]DRY RUN MODE - No data will be modified[/yellow]")
 
-        # Create updater
-        update_config = UpdateConfig(
-            update_mode=UpdateMode(mode.upper()),
-            batch_size=batch_size,
-            force_update=force,
-            start_date=start_dt,
-            end_date=end_dt
-        )
+        # Create updater with temporal store
+        update_mode = UpdateMode(mode.upper())
 
-        updater = IncrementalUpdater(connector, update_config)
+        updater = IncrementalUpdater(
+            temporal_store=temporal_store,
+            finlab_connector=connector
+        )
 
         # Get sync plan
         sync_plan = updater.create_sync_plan(

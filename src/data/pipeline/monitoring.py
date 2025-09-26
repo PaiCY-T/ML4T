@@ -597,6 +597,11 @@ class PipelineMonitor:
 pipeline_monitor = PipelineMonitor()
 
 
+def get_pipeline_monitor() -> PipelineMonitor:
+    """Get the global pipeline monitor instance."""
+    return pipeline_monitor
+
+
 # Decorator for timing operations
 def monitor_performance(operation_name: str, component: str = "unknown"):
     """Decorator to automatically monitor operation performance."""

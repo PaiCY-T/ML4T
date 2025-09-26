@@ -22,7 +22,7 @@ import time
 
 from ...data.ingestion.finlab_connector import FinLabConnector, FinLabConfig
 from ...data.ingestion.finlab_auth import create_finlab_authenticator, AuthenticationError
-from ...data.pipeline.incremental_updater import IncrementalUpdater, UpdateConfig, UpdateMode
+from ...data.pipeline.incremental_updater import IncrementalUpdater, UpdateMode
 from ...data.pipeline.monitoring import get_pipeline_monitor, PipelineStatus, AlertLevel
 from ...data.pipeline.data_validation import DataValidator, ValidationReport
 from ..utils.formatting import format_table, format_status, format_duration, format_timestamp
@@ -171,13 +171,8 @@ def start(ctx, config_file: Optional[str], mode: str, datasets: tuple,
 
         console.print("[green]✓[/green] Connection established")
 
-        # Configure update settings
-        update_config = UpdateConfig(
-            update_mode=UpdateMode(mode),
-            batch_size=ctx.obj['config'].default_batch_size,
-            max_retries=ctx.obj['config'].default_retry_attempts,
-            timeout=ctx.obj['config'].default_timeout
-        )
+        # Configure update mode
+        update_mode = UpdateMode(mode)
 
         # Parse symbols if provided
         symbol_list = None
@@ -190,8 +185,13 @@ def start(ctx, config_file: Optional[str], mode: str, datasets: tuple,
         if dataset_list:
             console.print(f"Target datasets: {', '.join(dataset_list)}")
 
-        # Create and start updater
-        updater = IncrementalUpdater(connector, update_config)
+        # Create temporal store and updater
+        from ...data.core.temporal import TemporalDataManager
+        temporal_manager = TemporalDataManager()
+        updater = IncrementalUpdater(
+            temporal_store=temporal_manager.store,
+            finlab_connector=connector
+        )
 
         # Start the pipeline with progress tracking
         with Progress() as progress:

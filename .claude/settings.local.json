@@ -19,7 +19,17 @@
       "Bash(find:*)",
       "Bash(gh issue list:*)",
       "Bash(git worktree:*)",
-      "Bash(grep:*)"
+      "Bash(grep:*)",
+      "Bash(gh issue view:*)",
+      "Bash(gh issue create:*)",
+      "Bash(gh issue edit:*)",
+      "Bash(python scripts/finlab-cli:*)",
+      "Bash(python3 scripts/finlab-cli:*)",
+      "Bash(PYTHONPATH=/mnt/c/Users/jnpi/ML4T/new/src python3 -m cli.main --help)",
+      "mcp__zen__debug",
+      "Bash(finlab-cli:*)",
+      "Bash(kill:*)",
+      "Read(//mnt/c/Users/jnpi/ML4T/epic-finlab-data-integration-and-optimization/example/**)"
     ],
     "deny": [],
     "ask": []

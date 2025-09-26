@@ -92,8 +92,8 @@ fi
 # Add project src to Python path
 export PYTHONPATH="$PROJECT_DIR/src:$PYTHONPATH"
 
-# Run the CLI
-python3 "$PROJECT_DIR/src/cli/main.py" "$@"
+# Run the working CLI
+python3 "$SCRIPT_DIR/finlab-cli-working" "$@"
 EOF
 
 chmod +x "$WSL_CLI_PATH"
