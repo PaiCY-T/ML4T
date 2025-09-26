@@ -1,0 +1,28 @@
+# FinLab CLI Batch Commands Example
+# This file contains example commands that can be run in batch mode
+# Usage: finlab-cli batch script batch-commands.txt
+
+# System status checks
+pipeline status --format json
+monitoring health --format json
+monitoring alerts --hours 24 --level warning
+
+# Data validation for key datasets
+validation run --dataset fundamental --days 7
+validation run --dataset market --days 7
+
+# Performance monitoring
+monitoring metrics --hours 6 --metric-type timing
+monitoring check data_ingestion
+monitoring check validation
+
+# Data operations for major Taiwan stocks
+data query 2330 --days 5 --format json
+data query 2317 --days 5 --format json
+data query 2454 --days 5 --format json
+
+# Configuration validation
+config test
+
+# System diagnostics (if needed)
+# troubleshoot diagnose --format json

@@ -1,0 +1,48 @@
+# FinLab CLI Configuration Examples
+# Copy this file and customize for your environment
+
+# Example 1: Token-based authentication (recommended)
+finlab_token: "your_finlab_api_token_here"
+finlab_db_host: null  # Not needed with token auth
+finlab_db_port: 5432
+finlab_db_name: "finlab"
+finlab_db_username: null
+finlab_db_password: null
+
+# Example 2: Database credentials authentication
+# finlab_token: null
+# finlab_db_host: "your-database-host.com"
+# finlab_db_port: 5432
+# finlab_db_name: "finlab"
+# finlab_db_username: "your_username"
+# finlab_db_password: "your_password"
+
+# CLI Settings
+default_batch_size: 1000
+default_timeout: 300
+default_retry_attempts: 3
+
+# Output preferences
+default_output_format: "table"  # table, json, csv
+max_display_rows: 50
+
+# Logging configuration
+log_dir: "logs"
+log_retention_days: 30
+
+# Monitoring settings
+health_check_timeout: 30
+status_refresh_interval: 5
+
+# Pipeline settings
+pipeline_status_file: ".pipeline_status"
+pipeline_lock_file: ".pipeline_lock"
+
+# WSL-specific settings (uncomment if using WSL)
+# wsl_mode: true
+# windows_path_conversion: true
+
+# Development settings (uncomment for development)
+# debug_mode: false
+# enable_debug_logging: false
+# test_mode: false

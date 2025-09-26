@@ -1,0 +1,56 @@
+{
+  "dataset_name": "test_dataset",
+  "report_timestamp": "2025-09-25T19:14:52.751681",
+  "summary": {
+    "total_checks": 2,
+    "passed_checks": 0,
+    "failed_checks": 2,
+    "pass_rate": 0.0
+  },
+  "quality_metrics": {
+    "completeness": 100.0,
+    "accuracy": 100,
+    "consistency": 100,
+    "validity": 100,
+    "uniqueness": 100,
+    "timeliness": 0,
+    "overall": 95.0
+  },
+  "results_by_severity": {
+    "critical": 1,
+    "high": 1,
+    "medium": 0,
+    "low": 0,
+    "info": 0
+  },
+  "validation_results": [
+    {
+      "field_name": "schema",
+      "check_name": "missing_required_columns",
+      "severity": "critical",
+      "passed": false,
+      "message": "Missing required columns: {'adj_high', 'adj_close', 'adj_open', 'adj_low'}",
+      "details": {
+        "missing_columns": [
+          "adj_high",
+          "adj_close",
+          "adj_open",
+          "adj_low"
+        ]
+      },
+      "timestamp": "2025-09-25T19:14:52.735072"
+    },
+    {
+      "field_name": "date",
+      "check_name": "data_staleness",
+      "severity": "high",
+      "passed": false,
+      "message": "Latest data is 994 days old, exceeds threshold of 30 days",
+      "details": {
+        "days_old": 994,
+        "latest_date": "2023-01-05T00:00:00"
+      },
+      "timestamp": "2025-09-25T19:14:52.736825"
+    }
+  ]
+}

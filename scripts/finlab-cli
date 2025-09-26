@@ -1,0 +1,32 @@
+#!/usr/bin/env python3
+"""
+FinLab CLI Entry Point Script.
+
+This script provides a direct entry point for the FinLab CLI interface,
+supporting both direct Python execution and WSL compatibility.
+"""
+
+import sys
+import os
+from pathlib import Path
+
+# Add the src directory to Python path
+script_dir = Path(__file__).parent.absolute()
+src_dir = script_dir.parent / "src"
+sys.path.insert(0, str(src_dir))
+
+# Import and run CLI
+try:
+    from cli.main import cli
+
+    if __name__ == '__main__':
+        cli()
+
+except ImportError as e:
+    print(f"Error importing CLI module: {e}")
+    print("Please ensure the ML4T project is properly installed.")
+    print(f"Current Python path includes: {src_dir}")
+    sys.exit(1)
+except Exception as e:
+    print(f"Error running CLI: {e}")
+    sys.exit(1)

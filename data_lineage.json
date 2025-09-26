@@ -1,0 +1,14 @@
+[
+  {
+    "dataset_name": "test_dataset",
+    "source_system": "finlab",
+    "extraction_method": "etl",
+    "extraction_timestamp": "2025-09-25T19:14:52.741591",
+    "data_hash": "a9a544a19527edbf91a165b1910ebd96",
+    "row_count": 5,
+    "column_count": 3,
+    "file_size": null,
+    "transformation_steps": [],
+    "quality_score": 95.0
+  }
+]
