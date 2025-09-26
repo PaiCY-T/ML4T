@@ -18,6 +18,7 @@ from .commands import (
     list_command,
     config_command
 )
+from .commands.schedule import schedule
 
 
 # Global configuration manager instance
@@ -359,6 +360,10 @@ def config_init(ctx, path: Path, overwrite: bool):
     except FinLabDownloaderError as e:
         click.echo(f"Config operation failed: {e}", err=True)
         sys.exit(1)
+
+
+# Add schedule commands to CLI
+cli.add_command(schedule)
 
 
 @cli.command()
