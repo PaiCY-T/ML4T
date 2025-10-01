@@ -380,11 +380,11 @@ class RegimeStatisticalValidator:
         break_points = []
 
         for i in range(min_regime_length, len(scaled_cusum) - min_regime_length):
-            if abs(scaled_cusum[i]) > critical_value:
+            if abs(scaled_cusum.iloc[i]) > critical_value:
                 # Check if this is a local maximum
                 is_local_max = True
                 for j in range(max(0, i-5), min(len(scaled_cusum), i+6)):
-                    if j != i and abs(scaled_cusum[j]) >= abs(scaled_cusum[i]):
+                    if j != i and abs(scaled_cusum.iloc[j]) >= abs(scaled_cusum.iloc[i]):
                         is_local_max = False
                         break
 
